@@ -51,7 +51,9 @@ curl -L -o ~/bin/jellyfin.sh \
   https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/jellyfin-podman-tailscale/main/jellyfin.sh
 chmod +x ~/bin/jellyfin.sh
 
-(Replace the URL with your actual repo link after you push)2. Configure the media pathOpen the script and change only this line:
+(Replace the URL with your actual repo link after you push)
+
+2. Configure the media pathOpen the script and change only this line:
 
 MEDIA_PATH="/CHANGE/THIS/TO/YOUR/MEDIA/PATH"
 
