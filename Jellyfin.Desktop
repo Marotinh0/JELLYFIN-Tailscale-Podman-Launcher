@@ -1,0 +1,42 @@
+# ================================================
+# 💾 Jellyfin.desktop
+# ================================================
+
+[Desktop Entry]
+Version=1.0
+Name=Jellyfin
+GenericName=Media Server
+Comment=Start / Stop Jellyfin with one click (Podman + Tailscale)
+Exec=/home/YOUR_USERNAME/bin/Start-jellyfin.sh
+Icon=jellyfin
+Terminal=false
+Type=Application
+Categories=AudioVideo;Network;Utility;
+StartupNotify=true
+# Optional: make the icon look nice
+MimeType=application/x-shellscript;
+
+# ================================================
+# How to install (takes 10 seconds):
+# ================================================
+
+# 1. Replace YOUR_USERNAME with your real username
+#    (run `whoami` in terminal to see it)
+
+# 2. Save the file above as:
+#    ~/.local/share/applications/Jellyfin.desktop
+
+# 3. Make it executable:
+#    chmod +x ~/.local/share/applications/Jellyfin.desktop
+
+# 4. Refresh desktop icons (or log out/in):
+#    update-desktop-database ~/.local/share/applications/
+
+# 5. Drag the icon from the menu (search "Jellyfin") to your desktop if you want.
+
+# 💡 Want the icon to be prettier?
+#    Download the official Jellyfin logo and save it as:
+#    ~/.local/share/icons/jellyfin.png
+#    (then the Icon= line will automatically use it)
+
+# Done! Now just double-click the Jellyfin icon to start/stop your server.
