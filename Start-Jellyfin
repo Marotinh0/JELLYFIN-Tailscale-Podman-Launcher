@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# 🎬 JELLYFIN + Tailscale + Podman (Rootless)
+# ──────────────────────────────────────────────────────────────────────────────
+# One-click start/stop Jellyfin with GPU, Tailscale, auto-updates & notifications.
+#
+# ✨ Features
+#   • Click once to start, click again to stop
+#   • Updates Jellyfin automatically every time
+#   • Works with Tailscale for watching from anywhere
+#   • Full NVIDIA GPU support
+#   • Safe media drive check (no empty library)
+#   • Desktop notifications + health check
+#   • Weekly cleanup in background
+#
+# 📋 How to use 
+#   1. Save this file as ~/bin/jellyfin.sh (or anywhere)
+#   2. Run: chmod +x ~/bin/jellyfin.sh
+#   3. Edit ONLY the 4 lines in "USER CONFIGURATION" below
+#   4. Create a desktop shortcut to this script
+#   5. Done! Just click the icon to start/stop
+#
+# Original by Rathgesh 
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🛠️  USER CONFIGURATION — ONLY CHANGE THESE 4 LINES
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Network mode: "pasta" = faster (recommended)
+#               "slirp" = use only if pasta doesn't work
+NET_MODE="pasta"
+
+# Your Linux username (auto-detects for you — change ONLY if needed)
+HOST_USER="${USER:-$(whoami)}"
+
+# ←←← CHANGE THIS LINE ←←←
+# Full path to your movies/TV folder
+# Example: MEDIA_PATH="/run/media/$(whoami)/Movies"
+#          or MEDIA_PATH="/mnt/media"
+MEDIA_PATH="/CHANGE/THIS/TO/YOUR/MEDIA/PATH"
+
+# Jellyfin settings (change only if you know why)
+CONTAINER_IMAGE="docker.io/jellyfin/jellyfin:latest"
+CONTAINER_NAME="jellyfin"
+JELLYFIN_PORT="8096"
+
+# Resource limits (safe defaults — change if you want more/less)
+MEMORY_LIMIT="12g"
+SHM_SIZE="8g"
+CPU_LIMIT="6"
+PIDS_LIMIT="4096"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🖥️  SYSTEM SETUP (no changes needed below)
+# ══════════════════════════════════════════════════════════════════════════════
+
+export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+export HOME="/home/${HOST_USER}"
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+
+NOTIFY_ICON="jellyfin"
+FAIL_ICON="error"
+
+# Prepare folders and services
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+[[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && \
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+systemctl --user start podman.socket --quiet || true
+
+LOCKFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🔍 START CHECKS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Prevent running twice
+if ! mkdir "$LOCKFILE" 2>/dev/null; then
+    notify-send "Jellyfin" "Already starting…" -i "$NOTIFY_ICON"
+    exit 1
+fi
+trap 'rmdir "$LOCKFILE" 2>/dev/null || true' EXIT
+
+# Stop if already running (toggle)
+if podman ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+    podman stop "${CONTAINER_NAME}" --time 15 >/dev/null
+    notify-send "Jellyfin Stopped" "Server shut down cleanly" -i "$NOTIFY_ICON"
+    exit 0
+fi
+
+podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+
+# Safety: check media drive is really there
+if ! mountpoint -q "$MEDIA_PATH" && [[ ! -d "$MEDIA_PATH" ]]; then
+    notify-send "Jellyfin ERROR" "Media folder not found!\n\nPlease fix MEDIA_PATH" -i "$FAIL_ICON"
+    exit 1
+fi
+
+# Create storage
+podman volume create jellyfin_config 2>/dev/null || true
+podman volume create jellyfin_cache  2>/dev/null || true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 📥 UPDATE & GPU PREP
+# ══════════════════════════════════════════════════════════════════════════════
+
+notify-send "Jellyfin" "Updating and preparing..." -i "$NOTIFY_ICON" --expire-time=2000
+podman pull "$CONTAINER_IMAGE" -q >/dev/null 2>&1 || true
+
+# NVIDIA GPU (auto)
+if command -v nvidia-ctk &>/dev/null; then
+    if [[ ! -f /etc/cdi/nvidia.yaml ]] || \
+       [[ $(find /etc/cdi/nvidia.yaml -mtime +1 2>/dev/null || echo 1) -eq 1 ]]; then
+        nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml --device-name-strategy=type-index >/dev/null 2>&1 || true
+        systemctl --user restart podman.socket --quiet || true
+    fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🌐 NETWORK (Tailscale auto-detected)
+# ══════════════════════════════════════════════════════════════════════════════
+
+TS_IP=$(tailscale ip -4 2>/dev/null || echo "")
+
+if [[ "$NET_MODE" == "pasta" ]]; then
+    NET_FLAGS="pasta:--map-gw"
+    MSG_MODE="🍝 Pasta (fast)"
+else
+    NET_FLAGS="slirp4netns:allow_host_loopback=true,mtu=9000"
+    MSG_MODE="🛡️ Slirp (stable)"
+fi
+
+PORT_ARGS="-p 127.0.0.1:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
+MSG_URLS="🏠 Local: http://localhost:${JELLYFIN_PORT}"
+
+if [[ -n "$TS_IP" ]]; then
+    PORT_ARGS+=" -p ${TS_IP}:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
+    MSG_URLS+="\n🌐 Tailscale: http://${TS_IP}:${JELLYFIN_PORT}"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🚀 START JELLYFIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+podman run -d \
+    --name "${CONTAINER_NAME}" \
+    --userns keep-id --user "$(id -u):$(id -g)" --group-add keep-groups \
+    --device nvidia.com/gpu=all --security-opt label=disable \
+    --security-opt no-new-privileges:true --cap-drop=ALL \
+    --cap-add=CHOWN,FOWNER,DAC_OVERRIDE,NET_BIND_SERVICE,SYS_NICE \
+    --memory "${MEMORY_LIMIT}" --shm-size="${SHM_SIZE}" \
+    --cpus "${CPU_LIMIT}" --pids-limit "${PIDS_LIMIT}" \
+    --network "${NET_FLAGS}" ${PORT_ARGS} \
+    --restart on-failure --stop-timeout 20 \
+    --log-opt max-size=10m --log-opt max-file=3 \
+    --health-cmd "wget -qO- http://localhost:${JELLYFIN_PORT}/health || exit 1" \
+    --health-interval 30s \
+    --tmpfs /tmp:exec,size=2G \
+    --tmpfs /config/transcodes:exec,noatime,size=10G \
+    -v jellyfin_config:/config:Z -v jellyfin_cache:/config/cache:Z \
+    -v "${MEDIA_PATH}":/media:ro,Z \
+    -e JELLYFIN_CACHE_DIR=/config/cache -e JELLYFIN_LOG_DIR=/config/log \
+    -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    -e JELLYFIN_PublishedServerUrl="http://${TS_IP:-localhost}:${JELLYFIN_PORT}" \
+    -e JELLYFIN_BIND_ADDRESS="0.0.0.0:${JELLYFIN_PORT}" \
+    "${CONTAINER_IMAGE}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🔔 WAIT & SHOW RESULT
+# ══════════════════════════════════════════════════════════════════════════════
+
+sleep 5
+if podman ps --filter "name=^${CONTAINER_NAME}$" --filter status=running | grep -q "${CONTAINER_NAME}"; then
+    notify-send "Jellyfin Started 🚀" "\n${MSG_MODE}\n\n${MSG_URLS}" \
+        -i "$NOTIFY_ICON" --expire-time=10000
+else
+    ERROR_LOG=$(podman logs --tail 1 "${CONTAINER_NAME}" 2>&1 || echo "Check logs")
+    notify-send "Jellyfin FAILED" "$ERROR_LOG" -i "$FAIL_ICON"
+    exit 1
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🧹 CLEANUP (once a week in background)
+# ══════════════════════════════════════════════════════════════════════════════
+
+PRUNE_FILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-last-prune"
+if [[ ! -f "$PRUNE_FILE" ]] || find "$PRUNE_FILE" -mtime +6 | grep -q .; then
+    (
+        podman image prune -f --filter "dangling=true" >/dev/null 2>&1
+        podman volume prune -f --filter "label!=io.podman.annotations.autocreate" >/dev/null 2>&1
+        touch "$PRUNE_FILE"
+    ) &
+fi
