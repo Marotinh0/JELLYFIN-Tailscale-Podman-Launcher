@@ -5,8 +5,6 @@ A clean, toggleable, GPU-accelerated Jellyfin launcher for Linux desktops using 
 Perfect for desktop icons — click once to start, click again to stop.  
 Works great with Tailscale for remote access from anywhere.
 
-![Jellyfin Logo](https://raw.githubusercontent.com/jellyfin/jellyfin-ux/master/branding/icon/png/jellyfin-icon-256.png)
-
 ---
 
 ## ✨ Features
@@ -42,7 +40,7 @@ nvidia-container-toolkit installed
 
 4. A mounted media folder containing your movies/TV shows.
 
-
+---
 
  🚀 Installation (2 minutes)
  
@@ -79,6 +77,8 @@ update-desktop-database ~/.local/share/applications/
 
 Now search “Jellyfin” in your menu or drag the icon to your desktop.
 
+---
+
 🛠️ Customization (All options)
  
  All settings can be changed in the USER CONFIGURATION section at the top of the script, or overridden with environment variables:
@@ -110,6 +110,7 @@ export JELLYFIN_MEDIA_PATH="/mnt/bigdrive/Media"
 export JELLYFIN_NET_MODE="slirp"
 export JELLYFIN_MEMORY="16g"
 
+---
 
 🖥️  How to UseDouble-click the desktop icon → starts Jellyfin (if stopped)  
 Click again → stops Jellyfin cleanly  
@@ -119,7 +120,7 @@ After start, you’ll see a notification with local + Tailscale URLs
 Access Jellyfin at:  Local: http://localhost:8096  
 Tailscale: http://100.x.x.x:8096 (shown in notification)
 
-
+---
 
 🔧 Troubleshooting"Media folder not found!"
 → Double-check MEDIA_PATH and that the drive is mounted."Process already active…"
@@ -128,6 +129,7 @@ Tailscale: http://100.x.x.x:8096 (shown in notification)
 → Run nvidia-smi and nvidia-ctk --version.Container won't start
 → Check logs: podman logs jellyfin
 
+---
 
  📝 License & CreditsFree to use, modify, and share  
 Original concept & core script by Rathgesh  
@@ -135,7 +137,7 @@ Cleaned, documented, and generalized for the community by Grok
 
 Made with ❤️ for the self-hosted community.
 
-
+---
 
 ⭐ Star this repo if it helps you!
  
