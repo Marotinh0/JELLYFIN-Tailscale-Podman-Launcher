@@ -17,7 +17,7 @@
 #   1. Save this file as ~/bin/jellyfin.sh (or anywhere)
 #   2. Run: chmod +x ~/bin/jellyfin.sh
 #   3. Edit ONLY the 4 lines in "USER CONFIGURATION" below
-#   4. Create a desktop shortcut to this script
+#   4. Create a desktop shortcut to this script with Jellyfin.Desktop
 #   5. Done! Just click the icon to start/stop
 #
 # Original by Rathgesh 
