@@ -28,7 +28,7 @@ Before using the script, make sure you have:
 
 1. **Podman** installed and running rootless  
    sudo dnf install podman   # Fedora / RHEL / Rocky
-   # or
+    or
    sudo apt install podman   # Ubuntu / Debian
    systemctl --user enable --now podman.socket
 
@@ -42,7 +42,7 @@ nvidia-container-toolkit installed
 
 ---
 
- 🚀 Installation (2 minutes)
+## 🚀 Installation (2 minutes)
  
  1. Download the script
 
@@ -79,7 +79,7 @@ Now search “Jellyfin” in your menu or drag the icon to your desktop.
 
 ---
 
-🛠️ Customization (All options)
+## 🛠️ Customization (All options)
  
  All settings can be changed in the USER CONFIGURATION section at the top of the script, or overridden with environment variables:
 
@@ -112,7 +112,7 @@ export JELLYFIN_MEMORY="16g"
 
 ---
 
-🖥️  How to UseDouble-click the desktop icon → starts Jellyfin (if stopped)  
+## 🖥️  How to UseDouble-click the desktop icon → starts Jellyfin (if stopped)  
 Click again → stops Jellyfin cleanly  
 First run will take ~30 seconds (pulls image + GPU setup)  
 After start, you’ll see a notification with local + Tailscale URLs
@@ -122,7 +122,7 @@ Tailscale: http://100.x.x.x:8096 (shown in notification)
 
 ---
 
-🔧 Troubleshooting"Media folder not found!"
+## 🔧 Troubleshooting"Media folder not found!"
 → Double-check MEDIA_PATH and that the drive is mounted."Process already active…"
 → Wait a few seconds or run podman stop jellyfin manually.No Tailscale URL in notification
 → Make sure Tailscale is running (tailscale status).GPU not detected
@@ -131,7 +131,7 @@ Tailscale: http://100.x.x.x:8096 (shown in notification)
 
 ---
 
- 📝 License & CreditsFree to use, modify, and share  
+## 📝 License & CreditsFree to use, modify, and share  
 Original concept & core script by Rathgesh  
 Cleaned, documented, and generalized for the community by Grok
 
@@ -139,7 +139,7 @@ Made with ❤️ for the self-hosted community.
 
 ---
 
-⭐ Star this repo if it helps you!
+## ⭐ Star this repo if it helps you!
  
  Any feedback or improvements? Open an issue or PR — happy to help!
 
