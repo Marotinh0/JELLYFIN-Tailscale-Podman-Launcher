@@ -130,10 +130,7 @@ Tailscale: http://<!---->100.x.x.x:8096 (shown in notification)
 ---
 
 ## 📝 License & CreditsFree to use, modify, and share  
-Original concept & core script by Rathgesh  
-Cleaned, documented, and generalized for the community by Grok
-
-Made with ❤️ for the self-hosted community.
+Original concept & core script by Me 
 
 ---
 
