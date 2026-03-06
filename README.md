@@ -1,5 +1,6 @@
-# 🎬 Jellyfin + Tailscale + Podman (Rootless)  
-**One-click start/stop Jellyfin media server**  
+# 🎬 Jellyfin + Tailscale + Podman (Rootless)
+
+**One-click start/stop Jellyfin media server**
 
 A clean, toggleable, GPU-accelerated Jellyfin launcher for Linux desktops using **Podman (rootless)**.  
 Perfect for desktop icons — click once to start, click again to stop.  
@@ -27,7 +28,8 @@ Works great with Tailscale for remote access from anywhere.
 Before using the script, make sure you have:
 
 1. **Podman** installed and running rootless  
-   sudo dnf install podman   # Fedora / RHEL / Rocky
+
+   sudo dnf install podman   # Fedora / RHEL / Rocky Linux
     or
    sudo apt install podman   # Ubuntu / Debian
    systemctl --user enable --now podman.socket
@@ -43,75 +45,69 @@ nvidia-container-toolkit installed
 ---
 
 ## 🚀 Installation (2 minutes)
- 
- 1. Download the script
 
+ ```bash
+ # Create bin folder
 mkdir -p ~/bin
+
+# Download the script
 curl -L -o ~/bin/jellyfin.sh \
-  https://raw.githubusercontent.com/YOUR-GITHUB-USERNAME/jellyfin-podman-tailscale/main/jellyfin.sh
+  https://<!---->raw.githubusercontent.com/Marotinh0/jellyfin-podman-tailscale/main/jellyfin.sh
+
+# Make it executable
 chmod +x ~/bin/jellyfin.sh
-
-(Replace the URL with your actual repo link after you push)
-
+```
 2. Configure the media pathOpen the script and change only this line:
-
+```bash
 MEDIA_PATH="/CHANGE/THIS/TO/YOUR/MEDIA/PATH"
-
+```
 Examples:
-
+```bash
 MEDIA_PATH="/run/media/$(whoami)/Movies"
 MEDIA_PATH="/mnt/media"
 MEDIA_PATH="/home/$(whoami)/Media"
-
+```
 You can also set it with an environment variable (no editing needed):
-
+```bash
 export JELLYFIN_MEDIA_PATH="/run/media/$(whoami)/Movies"
 ~/bin/jellyfin.sh
-
+```
 3. (Optional) Create a desktop launcherCopy the .desktop file I provided earlier to:
-
+```bash
 ~/.local/share/applications/Jellyfin.desktop
-
+```
 Then run:
-
+```bash
 chmod +x ~/.local/share/applications/Jellyfin.desktop
 update-desktop-database ~/.local/share/applications/
-
+```
 Now search “Jellyfin” in your menu or drag the icon to your desktop.
 
 ---
 
 ## 🛠️ Customization (All options)
- 
- All settings can be changed in the USER CONFIGURATION section at the top of the script, or overridden with environment variables:
 
-Variable                 Default           Description
+All settings can be changed in the **USER CONFIGURATION** section at the top of the script, or overridden with environment variables:
 
-JELLYFIN_MEDIA_PATH  /  (required)     /     Path to your movies/TV folder
- 
-JELLYFIN_NET_MODE    /    pasta       /      pasta or slirp
-
-JELLYFIN_HOST_USER  /  current user    /     Rarely needed
-
-JELLYFIN_IMAGE   /  docker.io/jellyfin/... / Custom image (e.g. beta)
-
-JELLYFIN_CONTAINER_NAME / jellyfin    /      Change if you want multiple instances
-
-JELLYFIN_PORT      /       8096       /      Web UI port
-
-JELLYFIN_MEMORY     /      12g        /      Memory limit
-
-JELLYFIN_SHM_SIZE     /    8g        /       Shared memory for transcoding
-
-JELLYFIN_CPUS       /      6         /       CPU cores
+| Variable                  | Default              | Description                                              |
+|:--------------------------|:--------------------:|----------------------------------------------------------|
+| `JELLYFIN_MEDIA_PATH`     | (required)           | Path to your movies and TV shows folder                  |
+| `JELLYFIN_NET_MODE`       | `pasta`              | Network mode (`pasta` recommended or `slirp`)            |
+| `JELLYFIN_HOST_USER`      | current user         | Rarely needed                                            |
+| `JELLYFIN_IMAGE`          | official jellyfin    | Custom image (e.g. beta version)                         |
+| `JELLYFIN_CONTAINER_NAME` | `jellyfin`           | Container name (for multiple instances)                  |
+| `JELLYFIN_PORT`           | `8096`               | Web UI port                                              |
+| `JELLYFIN_MEMORY`         | `12g`                | Memory limit for the container                           |
+| `JELLYFIN_SHM_SIZE`       | `8g`                 | Shared memory for transcoding                            |
+| `JELLYFIN_CPUS`           | `6`                  | Maximum CPU cores allowed                                |
 
 
-xample (in terminal or ~/.bashrc):
-
+Example (in terminal or ~/.bashrc):
+```bash
 export JELLYFIN_MEDIA_PATH="/mnt/bigdrive/Media"
 export JELLYFIN_NET_MODE="slirp"
 export JELLYFIN_MEMORY="16g"
-
+```
 ---
 
 ## 🖥️  How to UseDouble-click the desktop icon → starts Jellyfin (if stopped)  
