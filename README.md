@@ -115,8 +115,8 @@ Click again → stops Jellyfin cleanly
 First run will take ~30 seconds (pulls image + GPU setup)  
 After start, you’ll see a notification with local + Tailscale URLs
 
-Access Jellyfin at:  Local: http://localhost:8096  
-Tailscale: http://100.x.x.x:8096 (shown in notification)
+Access Jellyfin at:  Local: http://<!---->localhost:8096  
+Tailscale: http://<!---->100.x.x.x:8096 (shown in notification)
 
 ---
 
