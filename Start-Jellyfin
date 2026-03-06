@@ -2,76 +2,111 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # 🎬 JELLYFIN + Tailscale + Podman (Rootless)
 # ──────────────────────────────────────────────────────────────────────────────
-# One-click start/stop Jellyfin with GPU, Tailscale, auto-updates & notifications.
+# One-click start/stop Jellyfin with GPU acceleration, Tailscale remote access,
+# automatic updates, desktop notifications, and media safety checks.
 #
 # ✨ Features
-#   • Click once to start, click again to stop
-#   • Updates Jellyfin automatically every time
-#   • Works with Tailscale for watching from anywhere
-#   • Full NVIDIA GPU support
-#   • Safe media drive check (no empty library)
-#   • Desktop notifications + health check
-#   • Weekly cleanup in background
+#   • Toggle via desktop icon (click to start / click to stop)
+#   • Auto-updates Jellyfin on every launch
+#   • Tailscale IP auto-detection for watching from anywhere
+#   • Full NVIDIA GPU passthrough (CDI)
+#   • Pasta networking (fast) with Slirp fallback
+#   • Media drive safety check (prevents empty library)
+#   • Atomic lock + health check
+#   • Weekly background cleanup
+#   • Everything configurable with environment variables
 #
-# 📋 How to use 
-#   1. Save this file as ~/bin/jellyfin.sh (or anywhere)
-#   2. Run: chmod +x ~/bin/jellyfin.sh
-#   3. Edit ONLY the 4 lines in "USER CONFIGURATION" below
-#   4. Create a desktop shortcut to this script with Jellyfin.Desktop
-#   5. Done! Just click the icon to start/stop
+# 📋 How to use
+#   1. Save as ~/bin/jellyfin.sh (or anywhere in PATH)
+#   2. chmod +x ~/bin/jellyfin.sh
+#   3. Edit ONLY the USER CONFIGURATION section (or use env vars)
+#   4. Create a desktop shortcut (see README)
+#   5. Click the icon — done!
 #
-# Original by Rathgesh 
 # ══════════════════════════════════════════════════════════════════════════════
 
+# SAFETY SETTINGS
+# set -e     → exit immediately if any command fails
+# set -u     → treat unset variables as an error
+# set -o pipefail → if any command in a pipe fails, the whole pipeline fails
+# This makes the script very reliable and prevents silent errors.
 set -euo pipefail
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🛠️  USER CONFIGURATION — ONLY CHANGE THESE 4 LINES
+# 🛠️ USER CONFIGURATION — ONLY CHANGE THIS SECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Network mode: "pasta" = faster (recommended)
-#               "slirp" = use only if pasta doesn't work
-NET_MODE="pasta"
+# NET_MODE
+# Controls how the container talks to the outside world.
+# "pasta" = modern, fast, recommended for most people
+# "slirp" = older, more compatible fallback (use if you have network issues)
+# You can also set it from terminal: export JELLYFIN_NET_MODE="pasta"
+NET_MODE="${JELLYFIN_NET_MODE:-pasta}"
 
-# Your Linux username (auto-detects for you — change ONLY if needed)
-HOST_USER="${USER:-$(whoami)}"
+# HOST_USER
+# Your Linux username. Used for file permissions and paths.
+# Almost never needs changing — it auto-detects your current user.
+# Override only if needed: export JELLYFIN_HOST_USER="yourname"
+HOST_USER="${JELLYFIN_HOST_USER:-$(whoami)}"
 
-# ←←← CHANGE THIS LINE ←←←
-# Full path to your movies/TV folder
-# Example: MEDIA_PATH="/run/media/$(whoami)/Movies"
-#          or MEDIA_PATH="/mnt/media"
-MEDIA_PATH="/CHANGE/THIS/TO/YOUR/MEDIA/PATH"
+# MEDIA_PATH ←←← THIS IS THE MOST IMPORTANT SETTING ←←←
+# Full path to your movies/TV shows folder.
+# The script will refuse to start if this folder is not mounted or missing.
+# CHANGE THIS to your actual media location!
+# Examples:
+#   MEDIA_PATH="/run/media/$(whoami)/Movies"
+#   MEDIA_PATH="/mnt/media"
+#   MEDIA_PATH="/home/$(whoami)/Media"
+# Override with env var: export JELLYFIN_MEDIA_PATH="/mnt/bigdrive/Media"
+MEDIA_PATH="${JELLYFIN_MEDIA_PATH:-/CHANGE/THIS/TO/YOUR/MEDIA/PATH}"
 
-# Jellyfin settings (change only if you know why)
-CONTAINER_IMAGE="docker.io/jellyfin/jellyfin:latest"
-CONTAINER_NAME="jellyfin"
-JELLYFIN_PORT="8096"
+# CONTAINER_IMAGE
+# Which Jellyfin image to use. Default is the official latest stable.
+# You can change to a beta or specific version if you want.
+CONTAINER_IMAGE="${JELLYFIN_IMAGE:-docker.io/jellyfin/jellyfin:latest}"
 
-# Resource limits (safe defaults — change if you want more/less)
-MEMORY_LIMIT="12g"
-SHM_SIZE="8g"
-CPU_LIMIT="6"
-PIDS_LIMIT="4096"
+# CONTAINER_NAME
+# Name of the running container. Change only if you want multiple Jellyfin instances.
+CONTAINER_NAME="${JELLYFIN_CONTAINER_NAME:-jellyfin}"
+
+# JELLYFIN_PORT
+# Web UI port (default 8096). Change only if port 8096 is already used on your PC.
+JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
+
+# Resource limits — change these if you want more or less power
+# MEMORY_LIMIT: How much RAM Jellyfin can use (12g is safe for most PCs)
+MEMORY_LIMIT="${JELLYFIN_MEMORY:-12g}"
+# SHM_SIZE: Shared memory for hardware transcoding (important for GPU)
+SHM_SIZE="${JELLYFIN_SHM_SIZE:-8g}"
+# CPU_LIMIT: How many CPU cores Jellyfin can use
+CPU_LIMIT="${JELLYFIN_CPUS:-6}"
+# PIDS_LIMIT: Maximum number of processes (safety limit)
+PIDS_LIMIT="${JELLYFIN_PIDS_LIMIT:-4096}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🖥️  SYSTEM SETUP (no changes needed below)
+# 🖥️ SYSTEM SETUP — No changes needed below
 # ══════════════════════════════════════════════════════════════════════════════
 
+# These environment variables make desktop notifications work and let Podman find its socket
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 export HOME="/home/${HOST_USER}"
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 
+# Icons used in desktop notifications
 NOTIFY_ICON="jellyfin"
 FAIL_ICON="error"
 
-# Prepare folders and services
+# Prepare runtime directory and Podman socket
+# This makes sure Podman can run as your normal user (rootless mode)
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && \
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 systemctl --user start podman.socket --quiet || true
 
+# LOCKFILE
+# This folder acts as a "lock" so you can't accidentally start Jellyfin twice
 LOCKFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -80,27 +115,32 @@ LOCKFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
 
 # Prevent running twice
 if ! mkdir "$LOCKFILE" 2>/dev/null; then
-    notify-send "Jellyfin" "Already starting…" -i "$NOTIFY_ICON"
+    notify-send "Jellyfin" "Already starting… (wait a moment)" -i "$NOTIFY_ICON"
     exit 1
 fi
+# Remove the lock automatically even if the script crashes
 trap 'rmdir "$LOCKFILE" 2>/dev/null || true' EXIT
 
-# Stop if already running (toggle)
+# Toggle: Stop if already running
+# This is what makes the desktop icon act as a start/stop switch
 if podman ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
     podman stop "${CONTAINER_NAME}" --time 15 >/dev/null
     notify-send "Jellyfin Stopped" "Server shut down cleanly" -i "$NOTIFY_ICON"
     exit 0
 fi
 
+# Clean up any old stopped container
 podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
-# Safety: check media drive is really there
+# Safety check — make sure your media drive is plugged in
+# Prevents Jellyfin from starting with an empty library
 if ! mountpoint -q "$MEDIA_PATH" && [[ ! -d "$MEDIA_PATH" ]]; then
-    notify-send "Jellyfin ERROR" "Media folder not found!\n\nPlease fix MEDIA_PATH" -i "$FAIL_ICON"
+    notify-send "Jellyfin ERROR" "Media folder not found!" -i "$FAIL_ICON"
     exit 1
 fi
 
-# Create storage
+# Create persistent storage
+# These volumes survive even if you delete the container
 podman volume create jellyfin_config 2>/dev/null || true
 podman volume create jellyfin_cache  2>/dev/null || true
 
@@ -108,44 +148,56 @@ podman volume create jellyfin_cache  2>/dev/null || true
 # 📥 UPDATE & GPU PREP
 # ══════════════════════════════════════════════════════════════════════════════
 
-notify-send "Jellyfin" "Updating and preparing..." -i "$NOTIFY_ICON" --expire-time=2000
+# Show a notification while we check for updates
+notify-send "Jellyfin" "Checking for updates and preparing GPU..." \
+    -i "$NOTIFY_ICON" --expire-time=2000
+
+# Automatically download the newest Jellyfin version every time
 podman pull "$CONTAINER_IMAGE" -q >/dev/null 2>&1 || true
 
-# NVIDIA GPU (auto)
+# NVIDIA GPU setup (auto)
+# Creates the CDI configuration file so Jellyfin can use your GPU
 if command -v nvidia-ctk &>/dev/null; then
     if [[ ! -f /etc/cdi/nvidia.yaml ]] || \
        [[ $(find /etc/cdi/nvidia.yaml -mtime +1 2>/dev/null || echo 1) -eq 1 ]]; then
-        nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml --device-name-strategy=type-index >/dev/null 2>&1 || true
+        nvidia-ctk cdi generate \
+            --output=/etc/cdi/nvidia.yaml \
+            --device-name-strategy=type-index >/dev/null 2>&1 || true
         systemctl --user restart podman.socket --quiet || true
     fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🌐 NETWORK (Tailscale auto-detected)
+# 🌐 NETWORKING (Tailscale auto-detected)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Get your Tailscale IP (empty if Tailscale is not running)
 TS_IP=$(tailscale ip -4 2>/dev/null || echo "")
 
+# Set network flags and message based on NET_MODE
 if [[ "$NET_MODE" == "pasta" ]]; then
     NET_FLAGS="pasta:--map-gw"
-    MSG_MODE="🍝 Pasta (fast)"
+    MSG_MODE="🍝 Pasta (Optimized)"
 else
     NET_FLAGS="slirp4netns:allow_host_loopback=true,mtu=9000"
-    MSG_MODE="🛡️ Slirp (stable)"
+    MSG_MODE="🛡️ Slirp (Stable)"
 fi
 
+# Port mapping for local access
 PORT_ARGS="-p 127.0.0.1:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
 MSG_URLS="🏠 Local: http://localhost:${JELLYFIN_PORT}"
 
+# Add Tailscale port mapping if Tailscale is active
 if [[ -n "$TS_IP" ]]; then
     PORT_ARGS+=" -p ${TS_IP}:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
     MSG_URLS+="\n🌐 Tailscale: http://${TS_IP}:${JELLYFIN_PORT}"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🚀 START JELLYFIN
+# 🚀 LAUNCH JELLYFIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+# This big command starts the Jellyfin container with all your settings
 podman run -d \
     --name "${CONTAINER_NAME}" \
     --userns keep-id --user "$(id -u):$(id -g)" --group-add keep-groups \
@@ -170,23 +222,25 @@ podman run -d \
     "${CONTAINER_IMAGE}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🔔 WAIT & SHOW RESULT
+# 🔔 WAIT & NOTIFY
 # ══════════════════════════════════════════════════════════════════════════════
 
-sleep 5
+# Wait a few seconds for the container to fully start
+sleep 6
 if podman ps --filter "name=^${CONTAINER_NAME}$" --filter status=running | grep -q "${CONTAINER_NAME}"; then
-    notify-send "Jellyfin Started 🚀" "\n${MSG_MODE}\n\n${MSG_URLS}" \
+    notify-send "Jellyfin" "Started 🚀 with:\n\n${MSG_MODE}\n\n${MSG_URLS}" \
         -i "$NOTIFY_ICON" --expire-time=10000
 else
-    ERROR_LOG=$(podman logs --tail 1 "${CONTAINER_NAME}" 2>&1 || echo "Check logs")
+    ERROR_LOG=$(podman logs --tail 30 "${CONTAINER_NAME}" 2>&1 || echo "No logs available - check podman run error")
     notify-send "Jellyfin FAILED" "$ERROR_LOG" -i "$FAIL_ICON"
     exit 1
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🧹 CLEANUP (once a week in background)
+# 🧹 WEEKLY CLEANUP (runs in background)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# This runs once a week to keep your system clean
 PRUNE_FILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-last-prune"
 if [[ ! -f "$PRUNE_FILE" ]] || find "$PRUNE_FILE" -mtime +6 | grep -q .; then
     (
