@@ -155,6 +155,10 @@ notify-send "Jellyfin" "Checking for updates and preparing GPU..." \
 # Automatically download the newest Jellyfin version every time
 podman pull "$CONTAINER_IMAGE" -q >/dev/null 2>&1 || true
 
+# Force-load NVIDIA modules to ensure /dev/nvidia-modeset exists
+# This prevents the "failed to stat CDI host device" error
+#(remove) sudo modprobe -q nvidia nvidia-modeset nvidia-uvm nvidia-drm || true
+
 # NVIDIA GPU setup (auto)
 # Creates the CDI configuration file so Jellyfin can use your GPU
 if command -v nvidia-ctk &>/dev/null; then
