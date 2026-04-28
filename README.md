@@ -27,18 +27,31 @@ Works great with Tailscale for remote access from anywhere.
 
 Before using the script, make sure you have:
 
-1. **Podman** installed and running rootless  
+1. **Podman & Networking** installed and running rootless
 
-   sudo dnf install podman   # Fedora / RHEL / Rocky Linux
-    or
-   sudo apt install podman   # Ubuntu / Debian
-   systemctl --user enable --now podman.socket
+   # Arch Linux / CachyOS
+   sudo pacman -S podman passt libnotify wget
+   
+   # Fedora
+   sudo dnf install podman passt
+   
+   # Ubuntu / Debian
+   sudo apt install podman passt
+   
+   # Enable the user socket (Required):
+   ```systemctl --user enable --now podman.socket```
 
 2. Tailscale (optional but recommended for remote access)
 Installed and connected.
 
 3. NVIDIA GPU (optional)  NVIDIA drivers installed  
-nvidia-container-toolkit installed
+NVIDIA Drivers installed and working (nvidia-smi).
+
+nvidia-container-toolkit installed.
+
+Generate the CDI configuration (Required for rootless GPU):
+```sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml```
+
 
 4. A mounted media folder containing your movies/TV shows.
 
