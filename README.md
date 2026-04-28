@@ -40,7 +40,8 @@ Before using the script, make sure you have:
    
    # Enable the user socket (Required):
     ```bash
-   systemctl --user enable --now podman.socket```
+   systemctl --user enable --now podman.socket
+    ```
 
 3. Tailscale (optional but recommended for remote access)
 Installed and connected.
@@ -52,7 +53,8 @@ nvidia-container-toolkit installed.
 
 Generate the CDI configuration (Required for rootless GPU):
  ```bash
- sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml```
+ sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
 
 
 4. A mounted media folder containing your movies/TV shows.
