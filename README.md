@@ -29,16 +29,16 @@ Before using the script, make sure you have:
 
 1. **Podman & Networking** installed and running rootless
 
-   **Arch Linux / CachyOS
+   #Arch Linux / CachyOS
    sudo pacman -S podman passt libnotify wget
    
-   **Fedora
+   #Fedora
    sudo dnf install podman passt
    
-   **Ubuntu / Debian
+   #Ubuntu / Debian
    sudo apt install podman passt
    
-   **Enable the user socket (Required):
+   #Enable the user socket (Required):
     ```bash
    systemctl --user enable --now podman.socket
     ```
