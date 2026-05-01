@@ -127,22 +127,32 @@ export JELLYFIN_MEMORY="16g"
 ```
 ---
 
-## 🖥️  How to UseDouble-click the desktop icon → starts Jellyfin (if stopped)  
-Click again → stops Jellyfin cleanly  
-First run will take ~30 seconds (pulls image + GPU setup)  
-After start, you’ll see a notification with local + Tailscale URLs
+## 🖥️  How to Use Double-click the desktop icon → starts Jellyfin (if stopped)  
+* Double-click the desktop icon → starts Jellyfin (if stopped)  
+* Click again → stops Jellyfin cleanly  
+* First run will take ~30 seconds (pulls image + GPU setup)  
+* After start, you’ll see a notification with local + Tailscale URLs
 
 Access Jellyfin at:  Local: http://<!---->localhost:8096  
 Tailscale: http://<!---->100.x.x.x:8096 (shown in notification)
 
 ---
 
-## 🔧 Troubleshooting"Media folder not found!"
-→ Double-check MEDIA_PATH and that the drive is mounted."Process already active…"
-→ Wait a few seconds or run podman stop jellyfin manually.No Tailscale URL in notification
-→ Make sure Tailscale is running (tailscale status).GPU not detected
-→ Run nvidia-smi and nvidia-ctk --version.Container won't start
-→ Check logs: podman logs jellyfin
+## 🔧 Troubleshooting "Media folder not found!"
+**"Media folder not found!"**
+→ Double-check `MEDIA_PATH` and that the drive is mounted.
+
+**"Process already active…"**
+→ Wait a few seconds or run `podman stop jellyfin` manually.
+
+**No Tailscale URL in notification**
+→ Make sure Tailscale is running (`tailscale status`).
+
+**GPU not detected**
+→ Run `nvidia-smi` and `nvidia-ctk --version`.
+
+**Container won't start**
+→ Check logs: `podman logs jellyfin`
 
 ---
 
