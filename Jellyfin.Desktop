@@ -4,23 +4,32 @@
 
 [Desktop Entry]
 Version=1.0
+Type=Application
 Name=Jellyfin
 GenericName=Media Server
 Comment=Start / Stop Jellyfin with one click (Podman + Tailscale)
-Exec=/home/YOUR_USERNAME/bin/Start-jellyfin.sh
+Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
 Icon=jellyfin
 Terminal=false
-Type=Application
 Categories=AudioVideo;Network;Utility;
 StartupNotify=true
 # Optional: make the icon look nice
 MimeType=application/x-shellscript;
+Actions=Stop;
+
+[Desktop Action Stop]
+# Reuses the script's own toggle logic, so it shuts down with the same
+# timeout, notification, and lockfile cleanup as the main icon — instead
+# of calling `podman stop` directly and bypassing all of that.
+Name=Stop Jellyfin
+Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
+Icon=process-stop
 
 # ================================================
 # How to install (takes 10 seconds):
 # ================================================
 
-# 1. Replace YOUR_USERNAME with your real username
+# 1. Replace YOUR_USERNAME (both Exec= lines above) with your real username
 #    (run `whoami` in terminal to see it)
 
 # 2. Save the file above as:
@@ -33,6 +42,8 @@ MimeType=application/x-shellscript;
 #    update-desktop-database ~/.local/share/applications/
 
 # 5. Drag the icon from the menu (search "Jellyfin") to your desktop if you want.
+#    Right-click the icon to see the "Stop Jellyfin" action separately,
+#    or just double-click the icon itself to toggle start/stop.
 
 # 💡 Want the icon to be prettier?
 #    Download the official Jellyfin logo and save it as:
