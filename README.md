@@ -85,7 +85,7 @@ mkdir -p ~/bin
 
 # Download the script
 curl -L -o ~/bin/jellyfin.sh \
-  https://raw.githubusercontent.com/Marotinh0/jellyfin-podman-tailscale/main/jellyfin.sh
+  https://raw.githubusercontent.com/Marotinh0/JELLYFIN-Tailscale-Podman-Launcher/main/jellyfin.sh
 
 # Make it executable
 chmod +x ~/bin/jellyfin.sh
