@@ -129,7 +129,14 @@ LOCKFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
 # Local log file with a history of everything the script did. Handy for
 # debugging after the desktop notification has already disappeared.
 # View it anytime with: tail -f "$XDG_RUNTIME_DIR/jellyfin.log"
+# Defined here (before the helper functions) so that log() is safe to call
+# from check_deps() and validate_config(), which run before the main body.
 LOGFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}.log"
+
+# Ensure the log directory exists before any log() call.
+# XDG_RUNTIME_DIR was already created above, but this guards against unusual
+# configurations where the two paths might differ.
+mkdir -p "$(dirname "$LOGFILE")"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 🔧 HELPER FUNCTIONS
@@ -157,9 +164,13 @@ notify() {
 # check_deps()
 # Confirms required commands exist before doing anything else, so a missing
 # dependency fails fast with a clear message instead of mid-script.
+# tailscale is listed here too: it's optional for remote access, but the
+# binary must be present for the "tailscale ip -4" call below to work
+# gracefully. Without this check, a missing binary would produce a confusing
+# "command not found" error deep inside the networking section.
 check_deps() {
     local missing=()
-    for cmd in podman notify-send mountpoint; do
+    for cmd in podman notify-send mountpoint tailscale; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if (( ${#missing[@]} > 0 )); then
@@ -216,7 +227,10 @@ wait_healthy() {
             return 0
         fi
         sleep "$HEALTH_INTERVAL"
-        (( elapsed += HEALTH_INTERVAL ))
+        # "|| true" is required here: in bash, an arithmetic expression that
+        # evaluates to 0 returns exit code 1, which would trigger "set -e"
+        # and kill the script on the last iteration when elapsed == HEALTH_TIMEOUT.
+        (( elapsed += HEALTH_INTERVAL )) || true
     done
     log "WARN" "Jellyfin did not respond within ${HEALTH_TIMEOUT}s — checking if the process is still alive"
     podman ps --filter "name=^${CONTAINER_NAME}$" --filter status=running \
@@ -290,13 +304,21 @@ fi
 # This prevents the "failed to stat CDI host device" error.
 # Commented out by default since it requires sudo, and we don't want this
 # script to demand elevated privileges out of the box. If you hit GPU
-# detection issues, uncomment the line below — ideally after adding a
-# narrowly-scoped NOPASSWD rule to /etc/sudoers.d for just these modprobe
-# calls, rather than granting broad sudo access:
-#   youruser ALL=(root) NOPASSWD: /usr/sbin/modprobe nvidia, \
-#     /usr/sbin/modprobe nvidia-modeset, /usr/sbin/modprobe nvidia-uvm, \
+# detection issues, uncomment the four lines below — ideally after adding a
+# narrowly-scoped NOPASSWD rule to /etc/sudoers.d for just these commands,
+# rather than granting broad sudo access:
+#
+#   youruser ALL=(root) NOPASSWD: \
+#     /usr/sbin/modprobe nvidia,           \
+#     /usr/sbin/modprobe nvidia-modeset,   \
+#     /usr/sbin/modprobe nvidia-uvm,       \
 #     /usr/sbin/modprobe nvidia-drm
-#(remove) sudo modprobe -q nvidia nvidia-modeset nvidia-uvm nvidia-drm || true
+#
+# Uncomment if needed:
+# sudo modprobe -q nvidia         || true
+# sudo modprobe -q nvidia-modeset || true
+# sudo modprobe -q nvidia-uvm     || true
+# sudo modprobe -q nvidia-drm     || true
 
 # NVIDIA GPU setup (auto)
 # Creates the CDI configuration file so Jellyfin can use your GPU.
@@ -345,13 +367,16 @@ else
     MSG_MODE="🛡️ Slirp (Stable)"
 fi
 
-# Port mapping for local access
-PORT_ARGS="-p 127.0.0.1:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
+# Port mapping for local access.
+# PORT_ARGS is a bash array (not a plain string) so each "-p host:port" flag
+# stays as its own element. Expanding a string with spaces unquoted inside
+# "podman run" can break silently in edge cases; "${PORT_ARGS[@]}" is always safe.
+PORT_ARGS=("-p" "127.0.0.1:${JELLYFIN_PORT}:${JELLYFIN_PORT}")
 MSG_URLS="🏠 Local: http://localhost:${JELLYFIN_PORT}"
 
 # Add Tailscale port mapping if Tailscale is active
 if [[ -n "$TS_IP" ]]; then
-    PORT_ARGS+=" -p ${TS_IP}:${JELLYFIN_PORT}:${JELLYFIN_PORT}"
+    PORT_ARGS+=("-p" "${TS_IP}:${JELLYFIN_PORT}:${JELLYFIN_PORT}")
     MSG_URLS+="\n🌐 Tailscale: http://${TS_IP}:${JELLYFIN_PORT}"
     log "INFO" "Tailscale detected: $TS_IP"
 else
@@ -370,7 +395,82 @@ PUBLISHED_URL="http://${TS_IP:-localhost}:${JELLYFIN_PORT}"
 log "INFO" "Starting container: $CONTAINER_NAME"
 log "INFO" "Image: $CONTAINER_IMAGE | Port: $JELLYFIN_PORT | Network: $MSG_MODE"
 
-# This big command starts the Jellyfin container with all your settings
+# Launch Jellyfin in detached (background) mode.
+# The flags are grouped below by concern — read the inline notes before
+# customizing anything here.
+#
+# IDENTITY & FILE PERMISSIONS
+#   --userns keep-id      maps your host UID/GID into the container so Jellyfin
+#                         can read your media files without running as root.
+#   --user $(id -u):$(id -g)  runs the process as you, not as container root.
+#   --group-add keep-groups   inherits supplementary groups (e.g. "video") so
+#                         the GPU device nodes are accessible.
+#
+# GPU PASSTHROUGH
+#   --device nvidia.com/gpu=all  exposes all NVIDIA GPUs via CDI (requires the
+#                         nvidia.yaml file generated in the GPU PREP section).
+#   --security-opt label=disable  disables SELinux labeling for GPU device
+#                         nodes, which would otherwise deny access in rootless
+#                         Podman.
+#
+# SECURITY HARDENING
+#   --security-opt no-new-privileges  prevents the process from gaining extra
+#                         capabilities at runtime (e.g. via setuid binaries).
+#   --cap-drop=ALL        strips every Linux capability from the container.
+#   --cap-add=...         adds back only the minimum Jellyfin needs:
+#                           CHOWN / FOWNER / DAC_OVERRIDE → manage config files
+#                           NET_BIND_SERVICE               → bind to port 8096
+#                           SYS_NICE                       → set process priority
+#                                                            for smooth playback
+#
+# RESOURCE LIMITS  (tune values in the USER CONFIGURATION section at the top)
+#   --memory     max RAM the container can use before the OOM killer steps in.
+#   --shm-size   shared memory for GPU transcoding; raise if you see /dev/shm
+#                errors during hardware encoding.
+#   --cpus       CPU core limit; raise/lower depending on your workload.
+#   --pids-limit safety cap on the number of processes inside the container.
+#
+# NETWORKING
+#   --network    pasta (fast, NAT) or slirp4netns (compatible) — set by NET_MODE.
+#   PORT_ARGS    binds 127.0.0.1 for local access, plus TS_IP if Tailscale is up.
+#
+# RESTART & LOG ROTATION
+#   --restart on-failure   restarts only on crash, NOT on clean shutdown (so
+#                          the stop-toggle works correctly).
+#   --stop-timeout 20      gives Jellyfin 20 seconds to finish in-progress
+#                          transcodes before being forcefully killed.
+#   --log-opt              rotates container logs: keeps 3 files × 10 MB.
+#
+# HEALTH CHECK
+#   Podman polls /health every 30 s and marks the container unhealthy if it
+#   fails. The wait_healthy() function above uses its own retry loop right
+#   after startup to detect readiness faster than 30 s.
+#
+# EPHEMERAL SCRATCH SPACE (RAM-backed)
+#   /tmp                   general temp files; exec is required so Jellyfin can
+#                          run its own helper binaries there.
+#   /config/transcodes     transcode segments; noatime skips access-time writes
+#                          for a small I/O boost. Both vanish on container stop.
+#
+# PERSISTENT VOLUMES
+#   jellyfin_config → all settings, metadata, and the library database.
+#   jellyfin_cache  → thumbnails and other regeneratable cache data.
+#   :Z              re-labels the volume for SELinux (no-op if SELinux is off).
+#
+# MEDIA MOUNT (read-only)
+#   Your media folder is mounted :ro so Jellyfin can never accidentally modify
+#   or delete your files.
+#
+# KEY ENVIRONMENT VARIABLES
+#   NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
+#                          tell the NVIDIA runtime which GPUs to expose and
+#                          which capability sets to enable (video = HW codec).
+#   JELLYFIN_PublishedServerUrl
+#                          the URL Jellyfin advertises to clients for playback.
+#                          Falls back to "localhost" when Tailscale is not running.
+#   JELLYFIN_BIND_ADDRESS  bind to all interfaces inside the container so both
+#                          local and Tailscale traffic reach it through the port
+#                          mappings above.
 podman run -d \
     --name "${CONTAINER_NAME}" \
     --userns keep-id --user "$(id -u):$(id -g)" --group-add keep-groups \
@@ -379,7 +479,7 @@ podman run -d \
     --cap-add=CHOWN,FOWNER,DAC_OVERRIDE,NET_BIND_SERVICE,SYS_NICE \
     --memory "${MEMORY_LIMIT}" --shm-size="${SHM_SIZE}" \
     --cpus "${CPU_LIMIT}" --pids-limit "${PIDS_LIMIT}" \
-    --network "${NET_FLAGS}" ${PORT_ARGS} \
+    --network "${NET_FLAGS}" "${PORT_ARGS[@]}" \
     --restart on-failure --stop-timeout 20 \
     --log-opt max-size=10m --log-opt max-file=3 \
     --health-cmd "wget -qO- http://localhost:${JELLYFIN_PORT}/health || exit 1" \
