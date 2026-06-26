@@ -136,13 +136,27 @@ Create a file at `~/.local/share/applications/Jellyfin.desktop` with contents si
 
 ```ini
 [Desktop Entry]
+Version=1.0
 Type=Application
 Name=Jellyfin
-Comment=Start/stop the Jellyfin media server
-Exec=/home/yourname/bin/jellyfin.sh
+GenericName=Media Server
+Comment=Start / Stop Jellyfin with one click (Podman + Tailscale)
+Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
 Icon=jellyfin
 Terminal=false
-Categories=AudioVideo;Video;
+Categories=AudioVideo;Network;Utility;
+StartupNotify=true
+# Optional: make the icon look nice
+MimeType=application/x-shellscript;
+Actions=Stop;
+
+[Desktop Action Stop]
+# Reuses the script's own toggle logic, so it shuts down with the same
+# timeout, notification, and lockfile cleanup as the main icon — instead
+# of calling `podman stop` directly and bypassing all of that.
+Name=Stop Jellyfin
+Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
+Icon=process-stop
 ```
 
 Then register it:
