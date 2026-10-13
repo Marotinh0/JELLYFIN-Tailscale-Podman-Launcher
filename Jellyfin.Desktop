@@ -1,53 +1,53 @@
-# ================================================
-# 💾 Jellyfin.desktop
-# ================================================
-
 [Desktop Entry]
-Version=1.0
+# Desktop launcher for the AMD edition.
+# 1. Change /home/YOUR_USER/bin/... to the real, ABSOLUTE path of the script
+#    (the Desktop Entry spec does not expand "~" or $HOME in Exec).
+# 2. Save it as ~/.local/share/applications/jellyfin-amd.desktop
+#    (and/or copy it to your Desktop). Then run: update-desktop-database ~/.local/share/applications
+# Clicking the icon starts Jellyfin; clicking it again stops it.
 Type=Application
-Name=Jellyfin
-GenericName=Media Server
-Comment=Start / Stop Jellyfin with one click (Podman + Tailscale)
-Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
+Name=Jellyfin (AMD)
+Comment=Start / stop the Jellyfin server (rootless Podman)
+Exec=/home/YOUR_USER/bin/jellyfin-amd.sh
 Icon=jellyfin
 Terminal=false
-Categories=AudioVideo;Network;Utility;
-StartupNotify=true
-# Optional: make the icon look nice
-MimeType=application/x-shellscript;
-Actions=Stop;
+Categories=AudioVideo;Video;Network;
+StartupNotify=false
+Actions=Status;Update;
 
-[Desktop Action Stop]
-# Reuses the script's own toggle logic, so it shuts down with the same
-# timeout, notification, and lockfile cleanup as the main icon — instead
-# of calling `podman stop` directly and bypassing all of that.
-Name=Stop Jellyfin
-Exec=/home/YOUR_USERNAME/bin/jellyfin.sh
-Icon=process-stop
+[Desktop Action Status]
+Name=Show status
+Exec=/home/YOUR_USER/bin/jellyfin-amd.sh status
 
-# ================================================
-# How to install (takes 10 seconds):
-# ================================================
+[Desktop Action Update]
+Name=Update Jellyfin now
+Exec=/home/YOUR_USER/bin/jellyfin-amd.sh update
 
-# 1. Replace YOUR_USERNAME (both Exec= lines above) with your real username
-#    (run `whoami` in terminal to see it)
 
-# 2. Save the file above as:
-#    ~/.local/share/applications/Jellyfin.desktop
 
-# 3. Make it executable:
-#    chmod +x ~/.local/share/applications/Jellyfin.desktop
+------------------------------------------------------------------------------------------------------------------------------------------
 
-# 4. Refresh desktop icons (or log out/in):
-#    update-desktop-database ~/.local/share/applications/
+[Desktop Entry]
+# Desktop launcher for the NVIDIA edition.
+# 1. Change /home/YOUR_USER/bin/... to the real, ABSOLUTE path of the script
+#    (the Desktop Entry spec does not expand "~" or $HOME in Exec).
+# 2. Save it as ~/.local/share/applications/jellyfin-nvidia.desktop
+#    (and/or copy it to your Desktop). Then run: update-desktop-database ~/.local/share/applications
+# Clicking the icon starts Jellyfin; clicking it again stops it.
+Type=Application
+Name=Jellyfin (NVIDIA)
+Comment=Start / stop the Jellyfin server (rootless Podman)
+Exec=/home/YOUR_USER/bin/jellyfin-nvidia.sh
+Icon=jellyfin
+Terminal=false
+Categories=AudioVideo;Video;Network;
+StartupNotify=false
+Actions=Status;Update;
 
-# 5. Drag the icon from the menu (search "Jellyfin") to your desktop if you want.
-#    Right-click the icon to see the "Stop Jellyfin" action separately,
-#    or just double-click the icon itself to toggle start/stop.
+[Desktop Action Status]
+Name=Show status
+Exec=/home/YOUR_USER/bin/jellyfin-nvidia.sh status
 
-# 💡 Want the icon to be prettier?
-#    Download the official Jellyfin logo and save it as:
-#    ~/.local/share/icons/jellyfin.png
-#    (then the Icon= line will automatically use it)
-
-# Done! Now just double-click the Jellyfin icon to start/stop your server.
+[Desktop Action Update]
+Name=Update Jellyfin now
+Exec=/home/YOUR_USER/bin/jellyfin-nvidia.sh update
