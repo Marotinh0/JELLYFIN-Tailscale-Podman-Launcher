@@ -1,538 +1,1073 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# 🎬 JELLYFIN + Tailscale + Podman (Rootless)
+# 🎬 JELLYFIN + Tailscale + Podman (rootless) — NVIDIA edition   v2.0.0
 # ──────────────────────────────────────────────────────────────────────────────
-# One-click start/stop Jellyfin with GPU acceleration, Tailscale remote access,
-# automatic updates, desktop notifications, and media safety checks.
+# A one-file launcher that runs Jellyfin in a hardened, ROOTLESS Podman
+# container with GPU transcoding, optional Tailscale remote access, automatic
+# updates (with a config backup first), desktop notifications and safety checks.
 #
-# ✨ Features
-#   • Toggle via desktop icon (click to start / click to stop)
-#   • Auto-updates Jellyfin on every launch (optional)
-#   • Tailscale IP auto-detection for watching from anywhere
-#   • Full NVIDIA GPU passthrough (CDI), with corruption detection
-#   • Pasta networking (fast) with Slirp fallback
-#   • Media drive safety check (prevents empty library)
-#   • Atomic lock + real health check (polls Jellyfin instead of a fixed sleep)
-#   • Startup config validation (port / memory / CPU) with clear error messages
-#   • Centralized logging to a local file and to journald
-#   • Weekly background cleanup
-#   • Everything configurable with environment variables
+# Project : https://github.com/Marotinh0/JELLYFIN-Tailscale-Podman-Launcher
+# GPU     : NVIDIA (NVENC/NVDEC) through CDI — needs the NVIDIA driver + nvidia-container-toolkit
 #
-# 📋 How to use
-#   1. Save as ~/bin/jellyfin.sh (or anywhere in PATH)
-#   2. chmod +x ~/bin/jellyfin.sh
-#   3. Edit ONLY the USER CONFIGURATION section (or use env vars)
-#   4. Create a desktop shortcut (see README)
-#   5. Click the icon — done!
+# ✨ FEATURES
+#   • Toggle from a desktop icon: click = start, click again = stop
+#   • Tailscale IP auto-detected → watch from anywhere, no port forwarding
+#   • Hardware transcoding: NVIDIA GPU via CDI (NVENC/NVDEC), CDI spec checked for freshness
+#   • Hardened container: your own UID (never root), ALL capabilities dropped,
+#     no privilege escalation, memory/CPU/PID limits, read-only media mounts,
+#     ports bound to specific IPs only (never 0.0.0.0), optional read-only rootfs
+#   • Safe updates: pulls the newest image, and BEFORE running a new version it
+#     backs up your Jellyfin config/database (a major upgrade can migrate the
+#     database in a way that cannot be undone)
+#   • Media-drive guard: refuses to start if your drive is unplugged/empty, so
+#     Jellyfin never "forgets" your library
+#   • Real health check (polls Jellyfin) instead of a blind `sleep`
+#   • Pasta networking (fast) with a Slirp fallback
+#   • Log file with rotation + journald + desktop notifications
+#   • Everything is configurable with environment variables (no editing needed)
 #
+# 📋 QUICK START
+#   1. Install the requirements (see README.md): podman, passt, crun, curl,
+#      libnotify (optional), tailscale (optional), nvidia driver + nvidia-container-toolkit
+#   2. Save this file as ~/bin/jellyfin-nvidia.sh  and run:  chmod +x ~/bin/jellyfin-nvidia.sh
+#   3. Tell it where your media is (pick ONE way):
+#        a) edit MEDIA_PATH below, or
+#        b) export JELLYFIN_MEDIA_PATH="/path/to/your/media"
+#   4. Test it:      jellyfin-nvidia.sh --dry-run      (prints the podman command, changes nothing)
+#   5. Run it:       jellyfin-nvidia.sh                (first run: open http://localhost:8096)
+#   6. Optional: create a desktop icon (see the .desktop file in the repo).
+#
+# 📖 COMMANDS  (run `jellyfin-nvidia.sh help` to see them again)
+#   toggle   (default) start if stopped, stop if running — what the icon does
+#   start    start (does nothing if it is already running)
+#   stop     stop cleanly
+#   restart  stop + start
+#   update   force-pull the newest image (+ config backup) and restart
+#   status   show state, health, uptime and URLs   (exit code 3 when stopped)
+#   logs     follow the container logs (Ctrl+C to leave)
+#   backup   export the config volume to a compressed file (Jellyfin must be stopped)
+#   restore FILE   replace the config volume with a backup (asks for confirmation)
+#   help | --version
+#   --dry-run   print the exact `podman run` command and exit — no pull, no
+#               backup, no container. Great for reviewing what will happen.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # SAFETY SETTINGS
-# set -e     → exit immediately if any command fails
-# set -u     → treat unset variables as an error
-# set -o pipefail → if any command in a pipe fails, the whole pipeline fails
-# This makes the script very reliable and prevents silent errors.
-set -euo pipefail
+#   -E            the ERR trap also works inside functions
+#   -e            exit immediately if a command fails
+#   -u            using an unset variable is an error
+#   -o pipefail   a failing command inside a pipe fails the whole pipe
+# IFS (word splitting) is limited to newline/tab so paths with SPACES are safe.
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+SCRIPT_VERSION="2.0.0"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🛠️ USER CONFIGURATION — ONLY CHANGE THIS SECTION
+# 🛠️  USER CONFIGURATION — the ONLY section you may want to edit
+#     Every setting can ALSO be overridden from the terminal without editing the
+#     file, for example:
+#         JELLYFIN_MEDIA_PATH="/mnt/media" JELLYFIN_MEMORY=12g jellyfin-nvidia.sh
+#     (or `export` them in ~/.bashrc / the .desktop file / a systemd unit)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# NET_MODE
-# Controls how the container talks to the outside world.
-# "pasta" = modern, fast, recommended for most people
-# "slirp" = older, more compatible fallback (use if you have network issues)
-# You can also set it from terminal: export JELLYFIN_NET_MODE="pasta"
-NET_MODE="${JELLYFIN_NET_MODE:-pasta}"
+# ── Your media ───────────────────────────────────────────────────────────────
 
-# HOST_USER
-# Your Linux username. Used for file permissions and paths.
-# Almost never needs changing — it auto-detects your current user.
-# Override only if needed: export JELLYFIN_HOST_USER="yourname"
-HOST_USER="${JELLYFIN_HOST_USER:-$(whoami)}"
-
-# MEDIA_PATH ←←← THIS IS THE MOST IMPORTANT SETTING ←←←
-# Full path to your movies/TV shows folder.
-# The script will refuse to start if this folder is not mounted or missing.
-# CHANGE THIS to your actual media location!
+# MEDIA_PATH  ←←← THE MOST IMPORTANT SETTING ←←←
+# Full path of the folder that holds your movies/TV/music. It is mounted
+# READ-ONLY inside the container at /media, so Jellyfin can never modify or
+# delete your files. When you create libraries in Jellyfin, browse to /media.
+# The script refuses to start if the folder is missing, unmounted, or EMPTY
+# (an unplugged drive would otherwise give Jellyfin an empty library).
 # Examples:
-#   MEDIA_PATH="/run/media/$(whoami)/Movies"
 #   MEDIA_PATH="/mnt/media"
-#   MEDIA_PATH="/home/$(whoami)/Media"
-# Override with env var: export JELLYFIN_MEDIA_PATH="/mnt/bigdrive/Media"
+#   MEDIA_PATH="/run/media/$(id -un)/MyDrive"
+#   MEDIA_PATH="$HOME/Videos"
 MEDIA_PATH="${JELLYFIN_MEDIA_PATH:-/CHANGE/THIS/TO/YOUR/MEDIA/PATH}"
 
-# CONTAINER_IMAGE
-# Which Jellyfin image to use. Default is the official latest stable.
-# You can change to a beta or specific version if you want.
+# MEDIA_PATH_2 (optional): a second folder/drive, mounted read-only at /media2.
+# Leave empty to disable. If it is set but the drive is unplugged, the server
+# still starts (with a warning) without it — one missing drive must not take
+# your main library down too.
+MEDIA_PATH_2="${JELLYFIN_MEDIA_PATH_2:-}"
+
+# ── Container ────────────────────────────────────────────────────────────────
+
+# CONTAINER_IMAGE: which image to run. For the strictest setup, pin a version
+# (docker.io/jellyfin/jellyfin:10.11.0) or a digest (…jellyfin@sha256:…) and
+# set AUTO_PULL=false, so nothing ever changes unless YOU decide it.
 CONTAINER_IMAGE="${JELLYFIN_IMAGE:-docker.io/jellyfin/jellyfin:latest}"
 
-# CONTAINER_NAME
-# Name of the running container. Change only if you want multiple Jellyfin instances.
+# CONTAINER_NAME: change only if you want several Jellyfin instances.
 CONTAINER_NAME="${JELLYFIN_CONTAINER_NAME:-jellyfin}"
 
-# JELLYFIN_PORT
-# Web UI port (default 8096). Change only if port 8096 is already used on your PC.
-JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
-
-# Resource limits — change these if you want more or less power
-# MEMORY_LIMIT: How much RAM Jellyfin can use (12g is safe for most PCs)
-MEMORY_LIMIT="${JELLYFIN_MEMORY:-12g}"
-# SHM_SIZE: Shared memory for hardware transcoding (important for GPU)
-SHM_SIZE="${JELLYFIN_SHM_SIZE:-8g}"
-# CPU_LIMIT: How many CPU cores Jellyfin can use
-CPU_LIMIT="${JELLYFIN_CPUS:-6}"
-# PIDS_LIMIT: Maximum number of processes (safety limit)
-PIDS_LIMIT="${JELLYFIN_PIDS_LIMIT:-4096}"
-
-# AUTO_PULL
-# Automatically download the newest Jellyfin image on every launch: true or false.
-# Set to "false" if you prefer to control updates manually (e.g. `podman pull`
-# yourself), or if you're on a slow/metered connection.
+# AUTO_PULL: download the newest image at every start (true/false). Set to
+# "false" on a metered connection or when you pin a version.
 AUTO_PULL="${JELLYFIN_AUTO_PULL:-true}"
 
-# HEALTH_TIMEOUT
-# Maximum time (in seconds) to wait for Jellyfin to respond after starting,
-# before falling back to "is the process still alive?" as a looser success
-# check. Increase this on slower machines or first-time startups.
-HEALTH_TIMEOUT="${JELLYFIN_HEALTH_TIMEOUT:-30}"
-# HEALTH_INTERVAL: time (in seconds) between each health check attempt.
+# ── Network ──────────────────────────────────────────────────────────────────
+
+# JELLYFIN_PORT: port on THIS machine (inside the container it is always 8096).
+JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
+
+# NET_MODE: how the container reaches the internet.
+#   "pasta" = modern, fast, recommended (default in Podman 5)
+#   "slirp" = older fallback — use it if pasta gives you network problems
+NET_MODE="${JELLYFIN_NET_MODE:-pasta}"
+
+# LAN_ACCESS: also listen on this machine's LAN address (so TVs/phones on your
+# home network can connect). "false" = only localhost + Tailscale.
+LAN_ACCESS="${JELLYFIN_LAN_ACCESS:-true}"
+
+# DISCOVERY: publish UDP 7359 so Jellyfin apps can auto-discover the server.
+# Discovery uses broadcasts, which a port bound to a single IP usually does NOT
+# receive — so it often does nothing here. Off by default; apps can still
+# connect by typing the address.
+DISCOVERY="${JELLYFIN_DISCOVERY:-false}"
+
+# ALLOW_HOST_ACCESS: lets the container open connections to services running on
+# THIS machine (pasta --map-gw / slirp4netns allow_host_loopback). Jellyfin does
+# not need it. With "false", a compromised container cannot reach anything
+# listening on your loopback (databases, dev servers…). Enable only if a plugin
+# must talk to something on this machine (Sonarr, Jellyseerr…).
+ALLOW_HOST_ACCESS="${JELLYFIN_ALLOW_HOST_ACCESS:-false}"
+
+# EXPECTED_LAN_SUBNET (optional): a prefix such as "192.168.1." — if the detected
+# LAN IP is outside it, a warning is logged (useful when a VPN/exit node steals
+# the default route and your firewall rules no longer match). Empty = no check.
+EXPECTED_LAN_SUBNET="${JELLYFIN_LAN_SUBNET:-}"
+
+# ── Resource limits ──────────────────────────────────────────────────────────
+# MEMORY_LIMIT must cover more than the Jellyfin process: --shm-size and the
+# RAM-backed /tmp and transcode folders count against it too. The script warns
+# you if SHM_SIZE + TMP_SIZE (+ TRANSCODE_SIZE when in RAM) exceeds MEMORY_LIMIT.
+MEMORY_LIMIT="${JELLYFIN_MEMORY:-8g}"
+SHM_SIZE="${JELLYFIN_SHM_SIZE:-2g}"
+TMP_SIZE="${JELLYFIN_TMP_SIZE:-1g}"
+
+# CPU_LIMIT: hard cap on CPU cores ("auto" = half of your logical CPUs, min 2).
+CPU_LIMIT="${JELLYFIN_CPUS:-auto}"
+# CPU_SHARES: relative priority when the CPU is busy (default for any container
+# is 1024). 512 lets your games/desktop win over ffmpeg when CPU is scarce.
+CPU_SHARES="${JELLYFIN_CPU_SHARES:-512}"
+# PIDS_LIMIT: max processes inside the container (fork-bomb protection).
+PIDS_LIMIT="${JELLYFIN_PIDS_LIMIT:-4096}"
+
+# ── Transcoding scratch space ────────────────────────────────────────────────
+# Jellyfin writes temporary video segments while transcoding.
+#   TRANSCODE_MODE="ram"  → a tmpfs in RAM: fastest, zero SSD wear, but it uses
+#                           RAM (up to TRANSCODE_SIZE) — see MEMORY_LIMIT above.
+#   TRANSCODE_MODE="disk" → a Podman volume on disk: no RAM use, slower, writes
+#                           to your SSD/HDD.
+# ⚠️  Then set the SAME path in Jellyfin: Dashboard → Playback → Transcoding →
+#     "Transcode path" = TRANSCODE_PATH (default /config/transcodes).
+TRANSCODE_MODE="${JELLYFIN_TRANSCODE_MODE:-ram}"
+TRANSCODE_SIZE="${JELLYFIN_TRANSCODE_SIZE:-4g}"
+TRANSCODE_PATH="${JELLYFIN_TRANSCODE_PATH:-/config/transcodes}"
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+
+# READ_ONLY: run with a read-only root filesystem (only /config, /config/cache,
+# /tmp and the transcode folder stay writable). Safer, but not tested with every
+# plugin: try it, and set it back to "false" if something breaks.
+READ_ONLY="${JELLYFIN_READ_ONLY:-false}"
+
+# REQUIRE_GPU: "true" = refuse to start (instead of falling back to software
+# transcoding) when the GPU cannot be set up. Handy if your CPU is too slow to
+# transcode and you prefer a clear error.
+REQUIRE_GPU="${JELLYFIN_REQUIRE_GPU:-false}"
+
+# ── NVIDIA GPU (CDI) ─────────────────────────────────────────────────────────
+# NVIDIA_DEVICE: the CDI device to pass in. "nvidia.com/gpu=all" = every GPU.
+# On a multi-GPU box use e.g. "nvidia.com/gpu=0" (list them with: nvidia-ctk cdi list).
+NVIDIA_DEVICE="${JELLYFIN_NVIDIA_DEVICE:-nvidia.com/gpu=all}"
+# CDI_DIRS: folders where the CDI spec (nvidia.yaml) lives. Podman reads these two.
+CDI_DIRS="${JELLYFIN_CDI_DIRS:-/etc/cdi /var/run/cdi}"
+# CDI_AUTOREGEN: if the spec is missing or older than your driver, regenerate it
+# automatically with `sudo -n nvidia-ctk cdi generate`. Needs a passwordless
+# sudo rule for exactly that command (see README → "NVIDIA setup"). Off by
+# default so this script never asks for elevated rights on its own.
+CDI_AUTOREGEN="${JELLYFIN_CDI_AUTOREGEN:-false}"
+
+# ── Updates & backups ────────────────────────────────────────────────────────
+# BACKUP_BEFORE_UPDATE: when a NEW image has just been pulled, export the config
+# volume (library database, users, settings) to BACKUP_DIR before the new
+# version touches it. If the backup fails, the start is ABORTED (set this to
+# "false" to skip). Only the BACKUP_KEEP newest backups are kept.
+BACKUP_BEFORE_UPDATE="${JELLYFIN_BACKUP_BEFORE_UPDATE:-true}"
+BACKUP_KEEP="${JELLYFIN_BACKUP_KEEP:-3}"
+BACKUP_DIR="${JELLYFIN_BACKUP_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/jellyfin-backups}"
+
+# ── Waiting for Jellyfin ─────────────────────────────────────────────────────
+# Instead of a fixed `sleep`, the script asks Jellyfin "are you up?" every
+# HEALTH_INTERVAL seconds. Normal starts get a short timeout; the start that
+# follows an image update gets a long one (one-time database migration).
+# Timeout reached + container still running = counted as success.
+HEALTH_TIMEOUT_NORMAL="${JELLYFIN_HEALTH_TIMEOUT:-45}"
+HEALTH_TIMEOUT_AFTER_UPDATE="${JELLYFIN_HEALTH_TIMEOUT_UPDATE:-180}"
 HEALTH_INTERVAL=2
+# STOP_TIMEOUT: seconds Jellyfin gets to finish cleanly before being killed.
+STOP_TIMEOUT="${JELLYFIN_STOP_TIMEOUT:-20}"
+
+# TZ_VALUE: timezone passed to the container (so schedules and log times match
+# your machine). Empty = auto-detect with timedatectl.
+TZ_VALUE="${JELLYFIN_TZ:-}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🖥️ SYSTEM SETUP — No changes needed below
+# 🖥️  SYSTEM SETUP — no changes needed below this line
 # ══════════════════════════════════════════════════════════════════════════════
 
-# These environment variables make desktop notifications work and let Podman find its socket
-export DISPLAY="${DISPLAY:-:0}"
-export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
-export HOME="/home/${HOST_USER}"
+# This launcher is for ROOTLESS Podman: running it as root would defeat the
+# whole isolation model.
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "Do not run this script as root — it is meant for rootless Podman." >&2
+    exit 1
+fi
+
+# A fixed PATH: nothing placed earlier in your own PATH (or in a launcher's
+# environment) can silently replace podman, tailscale, etc.
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 
-# Icons used in desktop notifications
+# Runtime directory (created and owned by systemd-logind: we never create it).
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+    echo "Runtime dir $XDG_RUNTIME_DIR not found — log in with a normal user session first." >&2
+    exit 1
+fi
+# Needed so notify-send reaches your desktop when started from an icon/cron.
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
 NOTIFY_ICON="jellyfin"
 FAIL_ICON="error"
 
-# Prepare runtime directory and Podman socket
-# This makes sure Podman can run as your normal user (rootless mode)
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-[[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && \
-    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-systemctl --user start podman.socket --quiet || true
+# Named volumes (they survive deleting the container).
+CONFIG_VOLUME="jellyfin_config"
+CACHE_VOLUME="jellyfin_cache"
+TRANSCODE_VOLUME="jellyfin_transcodes"
 
-# LOCKFILE
-# This folder acts as a "lock" so you can't accidentally start Jellyfin twice
-LOCKFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
+# Port the container itself listens on (never changes).
+CONTAINER_PORT=8096
 
-# LOGFILE
-# Local log file with a history of everything the script did. Handy for
-# debugging after the desktop notification has already disappeared.
-# View it anytime with: tail -f "$XDG_RUNTIME_DIR/jellyfin.log"
-# Defined here (before the helper functions) so that log() is safe to call
-# from check_deps() and validate_config(), which run before the main body.
-LOGFILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}.log"
+# State directory: log file and the "last cleanup" marker. It lives in your home
+# (not in the RAM-backed runtime dir) so the history survives a reboot.
+STATE_DIR="${JELLYFIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/jellyfin-start}"
+# shellcheck disable=SC2174  # -m applies to the final directory only, which is what we want
+mkdir -p -m 700 "$STATE_DIR"
+LOGFILE="$STATE_DIR/${CONTAINER_NAME}.log"
+[[ -e "$LOGFILE" ]] || install -m 600 /dev/null "$LOGFILE"
+chmod 600 "$LOGFILE"
 
-# Ensure the log directory exists before any log() call.
-# XDG_RUNTIME_DIR was already created above, but this guards against unusual
-# configurations where the two paths might differ.
-mkdir -p "$(dirname "$LOGFILE")"
+# Simple log rotation: above 1 MiB, keep only the last 2000 lines.
+if [[ "$(stat -c %s "$LOGFILE")" -gt 1048576 ]]; then
+    ( umask 077; tail -n 2000 "$LOGFILE" > "$LOGFILE.tmp" ) && mv -f "$LOGFILE.tmp" "$LOGFILE"
+fi
+
+LOCKDIR="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-start.lock"
+LOCK_HELD=false
+DRY_RUN=false
+CMD="toggle"
+RESTORE_FILE=""
+RESTORE_TMP=""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 🔧 HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# log()
-# Writes a timestamped, leveled (INFO/WARN/ERROR) message to LOGFILE and to
-# journald (via "logger"). Check history later with:
-#   journalctl -t jellyfin-start
+# log LEVEL MESSAGE... — to the terminal, to LOGFILE and to journald
+# (read it later with: journalctl --user -t jellyfin-start).
 log() {
     local level="$1"; shift
-    local msg="$*"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg" | tee -a "$LOGFILE" || true
-    logger -t "jellyfin-start" "[$level] $msg" || true
+    local line
+    line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
+    printf '%s\n' "$line" | tee -a "$LOGFILE" >&2 || true
+    logger -t "jellyfin-start" "[$level] $*" 2>/dev/null || true
 }
 
-# notify()
-# Thin wrapper around notify-send that never crashes the script — useful if
-# you trigger this over SSH or from a cron job with no graphical session.
+# notify TITLE BODY [ICON] [EXPIRE_MS] — desktop notification; silently skipped
+# when there is no graphical session or notify-send is not installed.
 notify() {
     local title="$1" body="$2" icon="${3:-$NOTIFY_ICON}" expire="${4:-5000}"
+    $DRY_RUN && return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    # strip control characters (keeps newline and tab) that could break the popup
+    body="$(printf '%s' "$body" | tr -d '\000-\010\013\014\016-\037')"
     notify-send "$title" "$body" -i "$icon" --expire-time="$expire" 2>/dev/null || true
 }
 
-# check_deps()
-# Confirms required commands exist before doing anything else, so a missing
-# dependency fails fast with a clear message instead of mid-script.
-# tailscale is listed here too: it's optional for remote access, but the
-# binary must be present for the "tailscale ip -4" call below to work
-# gracefully. Without this check, a missing binary would produce a confusing
-# "command not found" error deep inside the networking section.
-check_deps() {
-    local missing=()
-    for cmd in podman notify-send mountpoint tailscale; do
-        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+# die MESSAGE... — log + notify + exit 1
+die() {
+    log "ERROR" "$*"
+    notify "Jellyfin ERROR" "$*" "$FAIL_ICON" 10000
+    exit 1
+}
+
+# Any unexpected failure (set -e) leaves a trace instead of dying silently.
+on_error() {
+    local code="$1" line="$2"
+    trap - ERR
+    log "ERROR" "Unexpected failure (exit code $code) at line $line — see $LOGFILE"
+    notify "Jellyfin FAILED" "Unexpected error at line $line (exit $code)."$'\n'"Log: $LOGFILE" "$FAIL_ICON" 10000
+}
+trap 'on_error $? $LINENO' ERR
+
+# Always release the lock and delete temp files, even after a crash.
+on_exit() {
+    if $LOCK_HELD; then rm -rf "$LOCKDIR"; fi
+    if [[ -n "$RESTORE_TMP" ]]; then rm -f -- "$RESTORE_TMP"; fi
+}
+trap on_exit EXIT
+
+is_true()  { case "${1,,}" in true|1|yes|y|on) return 0 ;; *) return 1 ;; esac; }
+is_uint()  { [[ "$1" =~ ^[0-9]+$ ]]; }
+is_size()  { [[ "$1" =~ ^[0-9]+[kKmMgG]$ ]]; }
+
+# to_mib 4g → 4096   (used for the memory sanity check)
+to_mib() {
+    local num="${1%[kKmMgG]}" unit="${1: -1}"
+    case "${unit,,}" in
+        k) echo $(( 10#$num / 1024 )) ;;
+        m) echo $(( 10#$num )) ;;
+        g) echo $(( 10#$num * 1024 )) ;;
+    esac
+}
+
+valid_ipv4() {
+    local ip="$1" octet
+    local -a parts
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a parts <<< "$ip"
+    for octet in "${parts[@]}"; do
+        (( 10#$octet <= 255 )) || return 1
     done
+}
+
+# acquire_lock — stops the script from running twice at once. A lock left by a
+# crashed run (dead PID) is detected and replaced.
+acquire_lock() {
+    local pid
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        :
+    else
+        pid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        log "WARN" "Removing a stale lock (previous PID: ${pid:-unknown})"
+        rm -rf "$LOCKDIR"
+        mkdir "$LOCKDIR" 2>/dev/null || return 1
+    fi
+    echo "$$" > "$LOCKDIR/pid"
+    LOCK_HELD=true
+}
+
+# resolve_cpu_limit — turns CPU_LIMIT="auto" into a number.
+resolve_cpu_limit() {
+    if [[ -z "$CPU_LIMIT" || "$CPU_LIMIT" == "auto" ]]; then
+        local n c
+        n="$(nproc 2>/dev/null || echo 2)"
+        c=$(( (n + 1) / 2 ))
+        if (( c < 2 )); then c=2; fi
+        CPU_LIMIT="$c"
+    fi
+}
+
+# check_deps — required commands are checked BEFORE anything else happens.
+check_deps() {
+    local missing=() cmd
+    for cmd in podman mountpoint ip awk find; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    case "$NET_MODE" in
+        pasta) command -v pasta >/dev/null 2>&1 || missing+=("pasta (package: passt)") ;;
+        slirp) command -v slirp4netns >/dev/null 2>&1 || missing+=("slirp4netns") ;;
+    esac
     if (( ${#missing[@]} > 0 )); then
-        log "ERROR" "Missing dependencies: ${missing[*]}"
-        notify "Jellyfin ERROR" "Missing dependencies: ${missing[*]}" "$FAIL_ICON"
-        exit 1
+        die "Missing required dependencies: ${missing[*]}"
+    fi
+    # Optional
+    command -v notify-send >/dev/null 2>&1 || log "WARN" "notify-send not found — no desktop notifications (package: libnotify)"
+    command -v tailscale   >/dev/null 2>&1 || log "WARN" "tailscale not found — remote access disabled (local/LAN only)"
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        log "WARN" "Neither curl nor wget found — health checks will use 'podman healthcheck run'"
     fi
 }
 
-# validate_config()
-# Sanity-checks the most sensitive settings (port / memory / CPU) so a typo
-# in an env var is caught here, with a clear message, instead of producing a
-# confusing failure deep inside `podman run`.
+# validate_config — catches typos before "podman run" blows up.
+# shellcheck disable=SC2015  # "A && B || die": die exits, so this is deliberate
 validate_config() {
-    # Port must be numeric and in a sane, non-privileged range
-    if ! [[ "$JELLYFIN_PORT" =~ ^[0-9]+$ ]] || \
-       (( JELLYFIN_PORT < 1024 || JELLYFIN_PORT > 65535 )); then
-        log "ERROR" "Invalid JELLYFIN_PORT: '$JELLYFIN_PORT' (use 1024-65535)"
-        notify "Jellyfin ERROR" "Invalid port: $JELLYFIN_PORT" "$FAIL_ICON"
-        exit 1
-    fi
+    resolve_cpu_limit
+    is_uint "$JELLYFIN_PORT" && (( JELLYFIN_PORT >= 1024 && JELLYFIN_PORT <= 65535 )) \
+        || die "Invalid JELLYFIN_PORT: '$JELLYFIN_PORT' (use 1024-65535)"
+    is_size "$MEMORY_LIMIT" || die "Invalid MEMORY_LIMIT: '$MEMORY_LIMIT' (e.g. 8g)"
+    is_size "$SHM_SIZE"     || die "Invalid SHM_SIZE: '$SHM_SIZE' (e.g. 2g)"
+    is_size "$TMP_SIZE"     || die "Invalid TMP_SIZE: '$TMP_SIZE' (e.g. 1g)"
+    is_size "$TRANSCODE_SIZE" || die "Invalid TRANSCODE_SIZE: '$TRANSCODE_SIZE' (e.g. 4g)"
+    # decimals are checked with awk (bc is not on every minimal system)
+    [[ "$CPU_LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v n="$CPU_LIMIT" 'BEGIN { exit !(n > 0) }' \
+        || die "Invalid CPU_LIMIT: '$CPU_LIMIT' (a number such as 4, or 'auto')"
+    is_uint "$CPU_SHARES" && (( CPU_SHARES >= 2 )) || die "Invalid CPU_SHARES: '$CPU_SHARES'"
+    is_uint "$PIDS_LIMIT" && (( PIDS_LIMIT >= 64 )) || die "Invalid PIDS_LIMIT: '$PIDS_LIMIT'"
+    is_uint "$BACKUP_KEEP" && (( BACKUP_KEEP >= 1 )) || die "Invalid BACKUP_KEEP: '$BACKUP_KEEP'"
+    is_uint "$STOP_TIMEOUT" || die "Invalid STOP_TIMEOUT: '$STOP_TIMEOUT'"
+    is_uint "$HEALTH_TIMEOUT_NORMAL" && is_uint "$HEALTH_TIMEOUT_AFTER_UPDATE" \
+        || die "Invalid health timeout values"
+    [[ "$NET_MODE" == "pasta" || "$NET_MODE" == "slirp" ]] \
+        || die "Invalid NET_MODE: '$NET_MODE' (use pasta or slirp)"
+    [[ "$TRANSCODE_MODE" == "ram" || "$TRANSCODE_MODE" == "disk" ]] \
+        || die "Invalid TRANSCODE_MODE: '$TRANSCODE_MODE' (use ram or disk)"
+    [[ "$TRANSCODE_PATH" == /* ]] || die "TRANSCODE_PATH must be an absolute path inside the container"
+    [[ "$CONTAINER_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] \
+        || die "Invalid CONTAINER_NAME: '$CONTAINER_NAME'"
 
-    # Memory must end in g, m, or k (e.g. 12g, 512m)
-    if ! [[ "$MEMORY_LIMIT" =~ ^[0-9]+[gGmMkK]$ ]]; then
-        log "ERROR" "Invalid MEMORY_LIMIT: '$MEMORY_LIMIT' (e.g. 12g)"
-        notify "Jellyfin ERROR" "Invalid memory: $MEMORY_LIMIT" "$FAIL_ICON"
-        exit 1
+    [[ "$MEDIA_PATH" != /CHANGE/THIS/* ]] \
+        || die "MEDIA_PATH is not set. Edit it in the script or run: JELLYFIN_MEDIA_PATH=/your/media $0"
+    [[ "$MEDIA_PATH" == /* ]] || die "MEDIA_PATH must be an absolute path"
+    # ':' would break the "-v host:container" syntax
+    [[ "$MEDIA_PATH" != *:* ]] || die "MEDIA_PATH must not contain ':'"
+    if [[ -n "$MEDIA_PATH_2" ]]; then
+        [[ "$MEDIA_PATH_2" == /* && "$MEDIA_PATH_2" != *:* ]] \
+            || die "MEDIA_PATH_2 must be an absolute path without ':'"
     fi
+    # NOTE: the paths' EXISTENCE is checked right before the container starts,
+    # with a clear "media folder not found" message.
 
-    # CPUs must be a positive number (decimals allowed, e.g. 6 or 6.5).
-    # Uses awk instead of "bc" for the decimal check, since bc isn't
-    # installed by default on every minimal distro — awk virtually always is.
-    if ! [[ "$CPU_LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
-       ! awk -v n="$CPU_LIMIT" 'BEGIN { exit !(n > 0) }'; then
-        log "ERROR" "Invalid CPU_LIMIT: '$CPU_LIMIT'"
-        notify "Jellyfin ERROR" "Invalid CPU: $CPU_LIMIT" "$FAIL_ICON"
-        exit 1
+    # Memory sanity check (warning only): RAM-backed mounts count against --memory.
+    local need
+    need=$(( $(to_mib "$SHM_SIZE") + $(to_mib "$TMP_SIZE") ))
+    if [[ "$TRANSCODE_MODE" == "ram" ]]; then need=$(( need + $(to_mib "$TRANSCODE_SIZE") )); fi
+    if (( need > $(to_mib "$MEMORY_LIMIT") )); then
+        log "WARN" "SHM + TMP$( [[ "$TRANSCODE_MODE" == "ram" ]] && echo ' + TRANSCODE' ) sizes (${need} MiB worst case) exceed MEMORY_LIMIT ($MEMORY_LIMIT) — the container could be OOM-killed under heavy transcoding. Raise JELLYFIN_MEMORY or lower the tmpfs sizes."
     fi
 }
 
-# wait_healthy()
-# Replaces a fixed "sleep N" with real polling against Jellyfin's /health
-# endpoint, checking every HEALTH_INTERVAL seconds up to HEALTH_TIMEOUT.
-# If it times out but the container process is still running, that's treated
-# as a (slow) success rather than a hard failure — first boots can be slow
-# while Jellyfin sets up its internal database.
+# media_available PATH — true if PATH is a mount point, or a folder that is
+# not empty (an empty leftover mount folder means the drive is NOT there).
+media_available() {
+    local p="$1"
+    mountpoint -q -- "$p" 2>/dev/null && return 0
+    [[ -d "$p" ]] || return 1
+    [[ -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]
+}
+
+is_running() {
+    podman ps --filter "name=^${CONTAINER_NAME}\$" --filter "status=running" \
+        --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"
+}
+
+# probe_health — ask Jellyfin from the HOST side (does not depend on wget/curl
+# existing inside the image).
+probe_health() {
+    local url="http://127.0.0.1:${JELLYFIN_PORT}/health"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 3 -o /dev/null "$url" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 3 -O /dev/null "$url" 2>/dev/null
+    else
+        podman healthcheck run "$CONTAINER_NAME" >/dev/null 2>&1
+    fi
+}
+
+# wait_healthy TIMEOUT — polls until Jellyfin answers or TIMEOUT seconds pass.
+# Timeout + container still running = success (a slow first boot is normal).
 wait_healthy() {
-    local elapsed=0
-    log "INFO" "Waiting for Jellyfin to become healthy (timeout: ${HEALTH_TIMEOUT}s)..."
-    while (( elapsed < HEALTH_TIMEOUT )); do
-        if podman exec "${CONTAINER_NAME}" \
-               wget -qO- "http://localhost:${JELLYFIN_PORT}/health" &>/dev/null; then
+    local timeout="$1" elapsed=0
+    log "INFO" "Waiting for Jellyfin to become healthy (timeout: ${timeout}s)..."
+    while (( elapsed < timeout )); do
+        if probe_health; then
             log "INFO" "Jellyfin responded after ${elapsed}s"
             return 0
         fi
         sleep "$HEALTH_INTERVAL"
-        # "|| true" is required here: in bash, an arithmetic expression that
-        # evaluates to 0 returns exit code 1, which would trigger "set -e"
-        # and kill the script on the last iteration when elapsed == HEALTH_TIMEOUT.
+        # "|| true": an arithmetic expression that evaluates to 0 returns exit
+        # code 1, which would trigger "set -e".
         (( elapsed += HEALTH_INTERVAL )) || true
     done
-    log "WARN" "Jellyfin did not respond within ${HEALTH_TIMEOUT}s — checking if the process is still alive"
-    podman ps --filter "name=^${CONTAINER_NAME}$" --filter status=running \
-        --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"
+    log "WARN" "Jellyfin did not respond within ${timeout}s — checking if the process is still alive"
+    is_running
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🔍 START CHECKS
+# 📦 UPDATE, BACKUP & RESTORE
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Fail fast on missing tools or bad config, before touching podman/the system.
-check_deps
-validate_config
+IMAGE_UPDATED=false
 
-# Prevent running twice
-if ! mkdir "$LOCKFILE" 2>/dev/null; then
-    notify "Jellyfin" "Already starting… (wait a moment)" "$NOTIFY_ICON"
-    exit 1
-fi
-# Remove the lock automatically even if the script crashes
-trap 'rmdir "$LOCKFILE" 2>/dev/null || true' EXIT
-
-log "INFO" "Script started by $HOST_USER (PID $$)"
-
-# Toggle: Stop if already running
-# This is what makes the desktop icon act as a start/stop switch
-if podman ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
-    log "INFO" "Running container detected — stopping it..."
-    podman stop "${CONTAINER_NAME}" --time 15 >/dev/null
-    log "INFO" "Container stopped successfully"
-    notify "Jellyfin Stopped" "Server shut down cleanly" "$NOTIFY_ICON"
-    exit 0
-fi
-
-# Clean up any old stopped container
-podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
-
-# Safety check — make sure your media drive is plugged in
-# Prevents Jellyfin from starting with an empty library
-if ! mountpoint -q "$MEDIA_PATH" && [[ ! -d "$MEDIA_PATH" ]]; then
-    log "ERROR" "Media folder not found: $MEDIA_PATH"
-    notify "Jellyfin ERROR" "Media folder not found!" "$FAIL_ICON"
-    exit 1
-fi
-
-# Create persistent storage
-# These volumes survive even if you delete the container
-podman volume create jellyfin_config 2>/dev/null || true
-podman volume create jellyfin_cache  2>/dev/null || true
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 📥 UPDATE & GPU PREP
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Show a notification while we check for updates
-notify "Jellyfin" "Checking for updates and preparing GPU..." "$NOTIFY_ICON" 2000
-
-# Download the newest Jellyfin image, if AUTO_PULL is enabled.
-# A failed pull (e.g. no internet) is logged but won't stop the script —
-# it just keeps using whatever image is already cached locally.
-if [[ "$AUTO_PULL" == "true" ]]; then
+pull_image() {
+    is_true "$AUTO_PULL" || { log "INFO" "AUTO_PULL disabled — using the local image"; return 0; }
     log "INFO" "Checking for image update: $CONTAINER_IMAGE"
-    if ! podman pull "$CONTAINER_IMAGE" -q >/dev/null 2>&1; then
-        log "WARN" "Failed to update image — using existing local version"
+    local old_id new_id
+    old_id="$(podman image inspect "$CONTAINER_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
+    if ! podman pull -q "$CONTAINER_IMAGE" >/dev/null 2>>"$LOGFILE"; then
+        log "WARN" "Failed to update the image (no internet?) — using the existing local version"
+        return 0
+    fi
+    new_id="$(podman image inspect "$CONTAINER_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
+    if [[ -n "$old_id" && "$old_id" != "$new_id" ]]; then
+        IMAGE_UPDATED=true
+        log "WARN" "New Jellyfin image pulled — afterwards check Dashboard > Playback > Transcoding (hardware acceleration settings can be reset on big updates)"
     else
-        log "INFO" "Image updated or already up to date"
+        log "INFO" "Image is up to date"
     fi
-fi
+}
 
-# Force-load NVIDIA modules to ensure /dev/nvidia-modeset exists.
-# This prevents the "failed to stat CDI host device" error.
-# Commented out by default since it requires sudo, and we don't want this
-# script to demand elevated privileges out of the box. If you hit GPU
-# detection issues, uncomment the four lines below — ideally after adding a
-# narrowly-scoped NOPASSWD rule to /etc/sudoers.d for just these commands,
-# rather than granting broad sudo access:
-#
-#   youruser ALL=(root) NOPASSWD: \
-#     /usr/sbin/modprobe nvidia,           \
-#     /usr/sbin/modprobe nvidia-modeset,   \
-#     /usr/sbin/modprobe nvidia-uvm,       \
-#     /usr/sbin/modprobe nvidia-drm
-#
-# Uncomment if needed:
-# sudo modprobe -q nvidia         || true
-# sudo modprobe -q nvidia-modeset || true
-# sudo modprobe -q nvidia-uvm     || true
-# sudo modprobe -q nvidia-drm     || true
+# backup_config_volume — export the config volume (library DB, users, settings)
+# to BACKUP_DIR as a compressed file (zstd, or gzip if zstd is missing), mode 600.
+backup_config_volume() {
+    if ! podman volume exists "$CONFIG_VOLUME" 2>/dev/null; then
+        log "INFO" "No '$CONFIG_VOLUME' volume yet — nothing to back up"
+        return 0
+    fi
+    # This function is called as "backup_config_volume || die ...", and bash turns
+    # "set -e" OFF inside such a function — so every step that matters has its
+    # own explicit "|| return 1".
+    # shellcheck disable=SC2174
+    mkdir -p -m 700 "$BACKUP_DIR" || return 1
+    local stamp tarfile out
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    tarfile="$BACKUP_DIR/${CONFIG_VOLUME}-${stamp}.tar"
+    log "INFO" "Backing up '$CONFIG_VOLUME' → $BACKUP_DIR"
+    podman volume export "$CONFIG_VOLUME" --output "$tarfile" || return 1
+    if command -v zstd >/dev/null 2>&1; then
+        zstd -q -T0 --rm "$tarfile" || return 1
+        out="$tarfile.zst"
+    else
+        gzip -3 "$tarfile" || return 1
+        out="$tarfile.gz"
+    fi
+    chmod 600 "$out" || return 1
+    log "INFO" "Backup saved: $out ($(du -h "$out" | cut -f1))"
 
-# NVIDIA GPU setup (auto)
-# Creates the CDI configuration file so Jellyfin can use your GPU.
-# Regenerates it when it's missing, older than 1 day, OR when it exists but
-# fails validation via "nvidia-ctk cdi list" (catches a corrupted file that
-# a simple age check would otherwise accept as still valid).
-if command -v nvidia-ctk &>/dev/null; then
-    CDI_NEEDS_REGEN=false
+    # keep only the BACKUP_KEEP newest backups
+    local -a old_backups=()
+    mapfile -t old_backups < <(
+        find "$BACKUP_DIR" -maxdepth 1 -type f -name "${CONFIG_VOLUME}-*.tar.*" -printf '%T@ %p\n' \
+            | sort -rn | tail -n "+$((BACKUP_KEEP + 1))" | cut -d' ' -f2-
+    )
+    local f
+    for f in "${old_backups[@]}"; do
+        rm -f -- "$f"
+        log "INFO" "Removed old backup: $f"
+    done
+}
 
-    if [[ ! -f /etc/cdi/nvidia.yaml ]]; then
-        CDI_NEEDS_REGEN=true
-        log "INFO" "CDI missing — generating..."
-    elif [[ -n "$(find /etc/cdi/nvidia.yaml -mtime +1 2>/dev/null)" ]]; then
-        CDI_NEEDS_REGEN=true
-        log "INFO" "CDI outdated — regenerating..."
-    elif ! nvidia-ctk cdi list &>/dev/null; then
-        CDI_NEEDS_REGEN=true
-        log "WARN" "CDI invalid or corrupted — regenerating..."
+cmd_backup() {
+    is_running && die "Stop Jellyfin first (a backup of a running database may be inconsistent): $0 stop"
+    backup_config_volume || die "Backup FAILED"
+}
+
+# cmd_restore FILE — replaces the config volume with the contents of a backup.
+cmd_restore() {
+    local src="$RESTORE_FILE"
+    [[ -n "$src" ]] || die "Usage: $0 restore /path/to/jellyfin_config-YYYYMMDD-HHMMSS.tar.zst"
+    [[ -f "$src" && -r "$src" ]] || die "Backup file not found or not readable: $src"
+    is_running && die "Stop Jellyfin first: $0 stop"
+    [[ -t 0 ]] || die "restore must be run from a terminal (it asks for confirmation)"
+
+    # Decompress to a temp file FIRST: the safety backup below also rotates old
+    # backups, and could otherwise delete the very file we are restoring from.
+    RESTORE_TMP="$(mktemp -p "$STATE_DIR" restore.XXXXXX)"
+    case "$src" in
+        *.zst) command -v zstd >/dev/null 2>&1 || die "zstd is needed to read $src"
+               zstd -dcq -- "$src" > "$RESTORE_TMP" ;;
+        *.gz)  gzip -dc -- "$src" > "$RESTORE_TMP" ;;
+        *.tar) cp -- "$src" "$RESTORE_TMP" ;;
+        *)     die "Unknown backup format (expected .tar, .tar.gz or .tar.zst): $src" ;;
+    esac
+    tar -tf "$RESTORE_TMP" >/dev/null 2>&1 || die "This file is not a valid tar archive: $src"
+
+    local answer
+    read -r -p "This REPLACES your current Jellyfin config (library, users, settings) with: $src
+A safety backup of the current config is made first. Type YES to continue: " answer
+    if [[ "$answer" != "YES" ]]; then log "INFO" "Cancelled — nothing was changed."; exit 1; fi
+
+    backup_config_volume || die "Safety backup FAILED — restore cancelled"
+    podman rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    podman volume rm -f "$CONFIG_VOLUME" >/dev/null 2>&1 || true
+    podman volume create "$CONFIG_VOLUME" >/dev/null
+    podman volume import "$CONFIG_VOLUME" "$RESTORE_TMP"
+    log "INFO" "Restore complete. Start Jellyfin again with: $0 start"
+    notify "Jellyfin" "Config restored from $(basename -- "$src")" "$NOTIFY_ICON"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🎮 GPU
+# ══════════════════════════════════════════════════════════════════════════════
+
+# detect_gpu fills three globals:
+#   GPU_OK    true/false — was a usable GPU found?
+#   GPU_ARGS  extra `podman run` arguments for the GPU (device flags…)
+#   GPU_ENV   extra `-e` arguments for the GPU
+GPU_OK=false
+GPU_ARGS=()
+GPU_ENV=()
+
+# NVIDIA uses CDI (Container Device Interface): a spec file, generated once by
+# `nvidia-ctk`, tells Podman exactly which driver libraries and /dev/nvidia*
+# nodes to inject. It must be regenerated after every driver update.
+
+# nvidia_cdi_specs — prints the CDI spec files that describe NVIDIA GPUs.
+nvidia_cdi_specs() {
+    local -a dirs=()
+    local d f
+    IFS=' ' read -r -a dirs <<< "$CDI_DIRS"
+    for d in "${dirs[@]}"; do
+        [[ -d "$d" ]] || continue
+        for f in "$d"/*.yaml "$d"/*.yml "$d"/*.json; do
+            [[ -f "$f" ]] || continue
+            if grep -q 'nvidia\.com/gpu' -- "$f" 2>/dev/null; then printf '%s\n' "$f"; fi
+        done
+    done
+    return 0
+}
+
+# cdi_regenerate — optional (CDI_AUTOREGEN=true). Needs a sudoers rule, see README.
+cdi_regenerate() {
+    local -a dirs=()
+    IFS=' ' read -r -a dirs <<< "$CDI_DIRS"
+    local out="${dirs[0]}/nvidia.yaml"
+    command -v nvidia-ctk >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1 || return 1
+    log "INFO" "Regenerating the CDI spec: sudo -n nvidia-ctk cdi generate --output=$out"
+    # shellcheck disable=SC2024  # the redirect is meant to run as YOU: it appends to your own log
+    sudo -n nvidia-ctk cdi generate --output="$out" >>"$LOGFILE" 2>&1
+}
+
+detect_gpu() {
+    local -a specs=()
+    local driver="" stale=false devname="${NVIDIA_DEVICE#*=}" hint
+    hint="Run once:  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml   (repeat after each driver update)"
+
+    mapfile -t specs < <(nvidia_cdi_specs)
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+                  | head -n1 | tr -d '[:space:]' || true)"
     fi
 
-    if [[ "$CDI_NEEDS_REGEN" == "true" ]]; then
-        if nvidia-ctk cdi generate \
-               --output=/etc/cdi/nvidia.yaml \
-               --device-name-strategy=type-index >/dev/null 2>&1; then
-            log "INFO" "CDI generated successfully"
-            systemctl --user restart podman.socket --quiet || true
+    if (( ${#specs[@]} == 0 )); then
+        log "WARN" "No NVIDIA CDI spec found in: $CDI_DIRS"
+        stale=true
+    elif [[ -n "$driver" ]] && ! grep -qF -- "$driver" "${specs[@]}" 2>/dev/null; then
+        log "WARN" "The CDI spec does not mention your current driver ($driver) — it is probably outdated"
+        stale=true
+    fi
+
+    # Optionally fix it automatically (never during --dry-run).
+    if $stale && is_true "$CDI_AUTOREGEN" && ! $DRY_RUN; then
+        if cdi_regenerate; then
+            mapfile -t specs < <(nvidia_cdi_specs)
+            stale=false
         else
-            log "WARN" "Failed to generate CDI — GPU might not be available"
+            log "WARN" "Automatic CDI regeneration failed (is the sudoers rule in place? see README)"
         fi
     fi
-fi
+    if $stale; then log "WARN" "$hint"; fi
+
+    if (( ${#specs[@]} == 0 )); then
+        log "WARN" "No GPU available — Jellyfin will use software (CPU) transcoding"
+        return 0
+    fi
+    # Does the spec define the device we were asked to pass in?
+    if ! grep -Eq "name\"?:[[:space:]]*[\"']?${devname}[\"']?,?[[:space:]]*\$" "${specs[@]}" 2>/dev/null; then
+        log "WARN" "CDI device '$NVIDIA_DEVICE' not found in: ${specs[*]} (list devices with: nvidia-ctk cdi list)"
+        return 0
+    fi
+    GPU_OK=true
+    GPU_ARGS=(--device "$NVIDIA_DEVICE")
+    # shellcheck disable=SC2054  # the commas are part of the capability list, not separators
+    GPU_ENV=(-e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video)
+    log "INFO" "NVIDIA GPU ready via CDI: $NVIDIA_DEVICE${driver:+ (driver $driver)}"
+}
+
+# warn_if_not_crun — "--group-add keep-groups" (needed to reach the GPU as a
+# member of the render/video group) only works with the crun OCI runtime.
+warn_if_not_crun() {
+    local rt
+    rt="$(podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null || true)"
+    if [[ -n "$rt" && "$rt" != "crun" ]]; then
+        log "WARN" "Podman is using the '$rt' runtime. GPU group access ('keep-groups') requires crun — install it and make it the default runtime if the GPU does not work"
+    fi
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 🌐 NETWORKING (Tailscale auto-detected)
+# 🌐 NETWORK DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Get your Tailscale IP (empty if Tailscale is not running)
-TS_IP=$(tailscale ip -4 2>/dev/null || echo "")
-
-# Set network flags and message based on NET_MODE
-if [[ "$NET_MODE" == "pasta" ]]; then
-    NET_FLAGS="pasta:--map-gw"
-    MSG_MODE="🍝 Pasta (Optimized)"
-else
-    NET_FLAGS="slirp4netns:allow_host_loopback=true,mtu=9000"
-    MSG_MODE="🛡️ Slirp (Stable)"
-fi
-
-# Port mapping for local access.
-# PORT_ARGS is a bash array (not a plain string) so each "-p host:port" flag
-# stays as its own element. Expanding a string with spaces unquoted inside
-# "podman run" can break silently in edge cases; "${PORT_ARGS[@]}" is always safe.
-PORT_ARGS=("-p" "127.0.0.1:${JELLYFIN_PORT}:${JELLYFIN_PORT}")
-MSG_URLS="🏠 Local: http://localhost:${JELLYFIN_PORT}"
-
-# Add Tailscale port mapping if Tailscale is active
-if [[ -n "$TS_IP" ]]; then
-    PORT_ARGS+=("-p" "${TS_IP}:${JELLYFIN_PORT}:${JELLYFIN_PORT}")
-    MSG_URLS+="\n🌐 Tailscale: http://${TS_IP}:${JELLYFIN_PORT}"
-    log "INFO" "Tailscale detected: $TS_IP"
-else
-    log "INFO" "Tailscale not available — local access only"
-fi
-
-# PUBLISHED_URL is resolved into its own variable (instead of being built
-# inline inside `podman run`) so the final value is easy to inspect/log
-# before it's used.
-PUBLISHED_URL="http://${TS_IP:-localhost}:${JELLYFIN_PORT}"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 🚀 LAUNCH JELLYFIN
-# ══════════════════════════════════════════════════════════════════════════════
-
-log "INFO" "Starting container: $CONTAINER_NAME"
-log "INFO" "Image: $CONTAINER_IMAGE | Port: $JELLYFIN_PORT | Network: $MSG_MODE"
-
-# Launch Jellyfin in detached (background) mode.
-# The flags are grouped below by concern — read the inline notes before
-# customizing anything here.
-#
-# IDENTITY & FILE PERMISSIONS
-#   --userns keep-id      maps your host UID/GID into the container so Jellyfin
-#                         can read your media files without running as root.
-#   --user $(id -u):$(id -g)  runs the process as you, not as container root.
-#   --group-add keep-groups   inherits supplementary groups (e.g. "video") so
-#                         the GPU device nodes are accessible.
-#
-# GPU PASSTHROUGH
-#   --device nvidia.com/gpu=all  exposes all NVIDIA GPUs via CDI (requires the
-#                         nvidia.yaml file generated in the GPU PREP section).
-#   --security-opt label=disable  disables SELinux labeling for GPU device
-#                         nodes, which would otherwise deny access in rootless
-#                         Podman.
-#
-# SECURITY HARDENING
-#   --security-opt no-new-privileges  prevents the process from gaining extra
-#                         capabilities at runtime (e.g. via setuid binaries).
-#   --cap-drop=ALL        strips every Linux capability from the container.
-#   --cap-add=...         adds back only the minimum Jellyfin needs:
-#                           CHOWN / FOWNER / DAC_OVERRIDE → manage config files
-#                           NET_BIND_SERVICE               → bind to port 8096
-#                           SYS_NICE                       → set process priority
-#                                                            for smooth playback
-#
-# RESOURCE LIMITS  (tune values in the USER CONFIGURATION section at the top)
-#   --memory     max RAM the container can use before the OOM killer steps in.
-#   --shm-size   shared memory for GPU transcoding; raise if you see /dev/shm
-#                errors during hardware encoding.
-#   --cpus       CPU core limit; raise/lower depending on your workload.
-#   --pids-limit safety cap on the number of processes inside the container.
-#
-# NETWORKING
-#   --network    pasta (fast, NAT) or slirp4netns (compatible) — set by NET_MODE.
-#   PORT_ARGS    binds 127.0.0.1 for local access, plus TS_IP if Tailscale is up.
-#
-# RESTART & LOG ROTATION
-#   --restart on-failure   restarts only on crash, NOT on clean shutdown (so
-#                          the stop-toggle works correctly).
-#   --stop-timeout 20      gives Jellyfin 20 seconds to finish in-progress
-#                          transcodes before being forcefully killed.
-#   --log-opt              rotates container logs: keeps 3 files × 10 MB.
-#
-# HEALTH CHECK
-#   Podman polls /health every 30 s and marks the container unhealthy if it
-#   fails. The wait_healthy() function above uses its own retry loop right
-#   after startup to detect readiness faster than 30 s.
-#
-# EPHEMERAL SCRATCH SPACE (RAM-backed)
-#   /tmp                   general temp files; exec is required so Jellyfin can
-#                          run its own helper binaries there.
-#   /config/transcodes     transcode segments; noatime skips access-time writes
-#                          for a small I/O boost. Both vanish on container stop.
-#
-# PERSISTENT VOLUMES
-#   jellyfin_config → all settings, metadata, and the library database.
-#   jellyfin_cache  → thumbnails and other regeneratable cache data.
-#   :Z              re-labels the volume for SELinux (no-op if SELinux is off).
-#
-# MEDIA MOUNT (read-only)
-#   Your media folder is mounted :ro so Jellyfin can never accidentally modify
-#   or delete your files.
-#
-# KEY ENVIRONMENT VARIABLES
-#   NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
-#                          tell the NVIDIA runtime which GPUs to expose and
-#                          which capability sets to enable (video = HW codec).
-#   JELLYFIN_PublishedServerUrl
-#                          the URL Jellyfin advertises to clients for playback.
-#                          Falls back to "localhost" when Tailscale is not running.
-#   JELLYFIN_BIND_ADDRESS  bind to all interfaces inside the container so both
-#                          local and Tailscale traffic reach it through the port
-#                          mappings above.
-podman run -d \
-    --name "${CONTAINER_NAME}" \
-    --userns keep-id --user "$(id -u):$(id -g)" --group-add keep-groups \
-    --device nvidia.com/gpu=all --security-opt label=disable \
-    --security-opt no-new-privileges:true --cap-drop=ALL \
-    --cap-add=CHOWN,FOWNER,DAC_OVERRIDE,NET_BIND_SERVICE,SYS_NICE \
-    --memory "${MEMORY_LIMIT}" --shm-size="${SHM_SIZE}" \
-    --cpus "${CPU_LIMIT}" --pids-limit "${PIDS_LIMIT}" \
-    --network "${NET_FLAGS}" "${PORT_ARGS[@]}" \
-    --restart on-failure --stop-timeout 20 \
-    --log-opt max-size=10m --log-opt max-file=3 \
-    --health-cmd "wget -qO- http://localhost:${JELLYFIN_PORT}/health || exit 1" \
-    --health-interval 30s \
-    --tmpfs /tmp:exec,size=2G \
-    --tmpfs /config/transcodes:exec,noatime,size=10G \
-    -v jellyfin_config:/config:Z -v jellyfin_cache:/config/cache:Z \
-    -v "${MEDIA_PATH}":/media:ro,Z \
-    -e JELLYFIN_CACHE_DIR=/config/cache -e JELLYFIN_LOG_DIR=/config/log \
-    -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
-    -e JELLYFIN_PublishedServerUrl="${PUBLISHED_URL}" \
-    -e JELLYFIN_BIND_ADDRESS="0.0.0.0:${JELLYFIN_PORT}" \
-    "${CONTAINER_IMAGE}"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔔 WAIT & NOTIFY
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Real health-check polling (see wait_healthy above) instead of a fixed
-# sleep — avoids announcing success too early, and avoids waiting longer
-# than necessary on fast machines.
-if wait_healthy; then
-    log "INFO" "Jellyfin started successfully — $MSG_URLS"
-    notify "Jellyfin" "Started 🚀 with:\n\n${MSG_MODE}\n\n${MSG_URLS}" "$NOTIFY_ICON" 10000
-else
-    # Error log is length-limited and stripped of control characters before
-    # going into the notification, so it can't corrupt or truncate it badly.
-    ERROR_LOG=$(podman logs --tail 20 "${CONTAINER_NAME}" 2>&1 \
-        | head -c 500 \
-        | tr -d '\000-\010\013\014\016-\037' \
-        || echo "No logs available - check podman run error")
-    log "ERROR" "Failed to start Jellyfin. Last log lines:"
-    log "ERROR" "$ERROR_LOG"
-    notify "Jellyfin FAILED" "$ERROR_LOG" "$FAIL_ICON"
-    exit 1
-fi
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 🧹 WEEKLY CLEANUP (runs in background)
-# ══════════════════════════════════════════════════════════════════════════════
-
-# This runs once a week to keep your system clean. Errors are now recorded
-# in LOGFILE instead of being silently discarded.
-PRUNE_FILE="$XDG_RUNTIME_DIR/${CONTAINER_NAME}-last-prune"
-if [[ ! -f "$PRUNE_FILE" ]] || find "$PRUNE_FILE" -mtime +6 | grep -q .; then
-    (
-        log "INFO" "Running weekly image and volume cleanup..."
-        if podman image prune -f --filter "dangling=true" >>"$LOGFILE" 2>&1 && \
-           podman volume prune -f --filter "label!=io.podman.annotations.autocreate" >>"$LOGFILE" 2>&1; then
-            log "INFO" "Cleanup completed successfully"
-        else
-            log "WARN" "Cleanup completed with errors — check $LOGFILE"
+detect_network() {
+    TS_IP=""
+    if command -v tailscale >/dev/null 2>&1; then
+        TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+        valid_ipv4 "$TS_IP" || TS_IP=""
+        if [[ -z "$TS_IP" ]]; then
+            log "INFO" "Tailscale is installed but not connected (no IPv4) — run: tailscale up"
         fi
-        touch "$PRUNE_FILE"
-    ) &
-fi
+    fi
+
+    LAN_IP=""
+    if is_true "$LAN_ACCESS"; then
+        LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)"
+        if ! valid_ipv4 "$LAN_IP"; then
+            [[ -n "$LAN_IP" ]] && log "WARN" "Detected LAN IP '$LAN_IP' looks invalid"
+            LAN_IP=""
+        fi
+        # With a Tailscale exit node the "default route" address IS the Tailscale
+        # address — binding it twice would make podman fail.
+        if [[ -n "$LAN_IP" && "$LAN_IP" == "$TS_IP" ]]; then LAN_IP=""; fi
+        if [[ -n "$LAN_IP" && -n "$EXPECTED_LAN_SUBNET" && "$LAN_IP" != "${EXPECTED_LAN_SUBNET}"* ]]; then
+            log "WARN" "LAN IP ($LAN_IP) is outside the expected subnet (${EXPECTED_LAN_SUBNET}*) — firewall rules may block it (VPN/exit node?)"
+        fi
+    fi
+
+    # Network mode. Host access stays OFF unless ALLOW_HOST_ACCESS=true.
+    if [[ "$NET_MODE" == "pasta" ]]; then
+        NET_OPT="pasta"
+        is_true "$ALLOW_HOST_ACCESS" && NET_OPT="pasta:--map-gw"
+        MSG_MODE="🍝 Pasta"
+    else
+        NET_OPT="slirp4netns"
+        is_true "$ALLOW_HOST_ACCESS" && NET_OPT="slirp4netns:allow_host_loopback=true"
+        MSG_MODE="🛡️ Slirp"
+    fi
+
+    # Published ports (an array: each flag stays ONE argument).
+    # We bind to specific addresses — never 0.0.0.0 — so Jellyfin is reachable
+    # only from this machine, your LAN address and your Tailscale address.
+    PORT_ARGS=("-p" "127.0.0.1:${JELLYFIN_PORT}:${CONTAINER_PORT}")
+    MSG_URLS="🖥️ Local: http://127.0.0.1:${JELLYFIN_PORT}"
+    if [[ -n "$LAN_IP" ]]; then
+        PORT_ARGS+=("-p" "${LAN_IP}:${JELLYFIN_PORT}:${CONTAINER_PORT}")
+        MSG_URLS+=$'\n'"🏠 LAN: http://${LAN_IP}:${JELLYFIN_PORT}"
+        if is_true "$DISCOVERY"; then
+            PORT_ARGS+=("-p" "${LAN_IP}:7359:7359/udp")
+        fi
+    elif is_true "$LAN_ACCESS"; then
+        log "WARN" "Could not detect a LAN IP — LAN access and discovery disabled"
+    fi
+    if [[ -n "$TS_IP" ]]; then
+        PORT_ARGS+=("-p" "${TS_IP}:${JELLYFIN_PORT}:${CONTAINER_PORT}")
+        MSG_URLS+=$'\n'"🌐 Tailscale: http://${TS_IP}:${JELLYFIN_PORT}"
+        log "INFO" "Tailscale detected: $TS_IP"
+    else
+        log "INFO" "No Tailscale address — remote access only through your LAN"
+    fi
+
+    # The address Jellyfin advertises to clients: Tailscale > LAN > localhost.
+    PUBLISHED_URL="http://${TS_IP:-${LAN_IP:-127.0.0.1}}:${JELLYFIN_PORT}"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🚀 COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+stop_container() {
+    log "INFO" "Stopping the container (up to ${STOP_TIMEOUT}s)..."
+    podman stop "$CONTAINER_NAME" --time "$STOP_TIMEOUT" >/dev/null
+    log "INFO" "Container stopped successfully"
+    notify "Jellyfin stopped" "Server shut down cleanly" "$NOTIFY_ICON"
+}
+
+cmd_status() {
+    if is_running; then
+        local health started
+        health="$(podman inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")"
+        started="$(podman inspect --format '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null || echo "?")"
+        detect_network
+        printf 'Jellyfin is RUNNING\n  health : %s\n  started: %s\n  image  : %s\n%s\n' \
+            "$health" "$started" "$CONTAINER_IMAGE" "$MSG_URLS"
+        return 0
+    fi
+    echo "Jellyfin is STOPPED"
+    return 3
+}
+
+cmd_logs() {
+    podman container exists "$CONTAINER_NAME" 2>/dev/null || die "Container '$CONTAINER_NAME' does not exist yet"
+    exec podman logs -f --tail 200 "$CONTAINER_NAME"
+}
+
+# build_run_args USE_GPU(true|false) — assembles the whole `podman run` command
+# in the RUN_ARGS array (an array keeps every flag as one safe argument).
+#
+# Hardening in short: runs as YOUR user (not root), ALL capabilities dropped (a
+# non-root process does not need any), no privilege gain, no swap, pids/cpu/
+# memory limits, media mounted read-only, only the GPU device, ports bound to
+# specific IPs. Flags, grouped by purpose:
+#   IDENTITY   --userns keep-id --user UID:GID   your UID/GID inside the container,
+#              so files are readable without root
+#              --group-add keep-groups           keep your supplementary groups
+#              (render/video) → needed for GPU device access (requires crun)
+#   SECURITY   --cap-drop=ALL, no-new-privileges
+#   LIMITS     --memory/--memory-swap (same value = no swap), --shm-size, --cpus,
+#              --cpu-shares, --pids-limit
+#   RESTART    --restart on-failure:5   restarts after a crash (max 5 times) but
+#              NOT after a clean stop, so the toggle works
+#   LOGS       rotated: 3 files × 10 MB
+#   HEALTH     Podman checks /health every 30 s
+#   SCRATCH    --tmpfs /tmp (exec is needed by Jellyfin's helper binaries) and
+#              the transcode folder (RAM or disk, see TRANSCODE_MODE)
+build_run_args() {
+    local use_gpu="$1"
+    # shellcheck disable=SC2054  # the commas are mount options (exec,nosuid,...), not separators
+    RUN_ARGS=(
+        run -d
+        --name "$CONTAINER_NAME" --replace
+        --userns keep-id --user "$(id -u):$(id -g)" --group-add keep-groups
+        --security-opt no-new-privileges:true --cap-drop=ALL
+        --memory "$MEMORY_LIMIT" --memory-swap "$MEMORY_LIMIT" --shm-size "$SHM_SIZE"
+        --cpus "$CPU_LIMIT" --cpu-shares "$CPU_SHARES" --pids-limit "$PIDS_LIMIT"
+        --network "$NET_OPT" "${PORT_ARGS[@]}"
+        --restart on-failure:5 --stop-timeout "$STOP_TIMEOUT"
+        --log-opt max-size=10m --log-opt max-file=3
+        --health-cmd "curl -fsS http://localhost:${CONTAINER_PORT}/health >/dev/null 2>&1 || wget -qO /dev/null http://localhost:${CONTAINER_PORT}/health || exit 1"
+        --health-interval 30s --health-start-period 60s --health-retries 3
+        --tmpfs "/tmp:exec,nosuid,nodev,size=${TMP_SIZE}"
+        -v "${CONFIG_VOLUME}:/config" -v "${CACHE_VOLUME}:/config/cache"
+        -v "${MEDIA_PATH}:/media:ro"
+    )
+    # Transcode folder
+    if [[ "$TRANSCODE_MODE" == "ram" ]]; then
+        RUN_ARGS+=(--tmpfs "${TRANSCODE_PATH}:exec,nosuid,nodev,noatime,size=${TRANSCODE_SIZE}")
+    else
+        RUN_ARGS+=(-v "${TRANSCODE_VOLUME}:${TRANSCODE_PATH}")
+    fi
+    # Second media folder (empty array = nothing added)
+    RUN_ARGS+=("${SECOND_MEDIA_MOUNT[@]}")
+    # GPU
+    if [[ "$use_gpu" == "true" ]]; then
+        RUN_ARGS+=("${GPU_ARGS[@]}" "${GPU_ENV[@]}")
+    fi
+    # SELinux: only when it is really enforcing (Fedora/RHEL — not Arch/Debian).
+    # The ":Z" relabel flag is deliberately NOT used: on a media drive it would
+    # relabel your whole library.
+    if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]]; then
+        RUN_ARGS+=(--security-opt label=disable)
+    fi
+    if is_true "$READ_ONLY"; then RUN_ARGS+=(--read-only); fi
+    if [[ -n "$TZ_VALUE" ]]; then RUN_ARGS+=(-e "TZ=${TZ_VALUE}"); fi
+    RUN_ARGS+=(
+        -e JELLYFIN_CACHE_DIR=/config/cache -e JELLYFIN_LOG_DIR=/config/log
+        -e "JELLYFIN_PublishedServerUrl=${PUBLISHED_URL}"
+        "$CONTAINER_IMAGE"
+    )
+}
+
+cmd_start() {
+    # Make sure the media drive is really there (prevents an empty library).
+    if ! media_available "$MEDIA_PATH"; then
+        if $DRY_RUN; then
+            log "WARN" "Media folder not available (ignored in --dry-run): $MEDIA_PATH"
+        else
+            die "Media folder not found or empty: $MEDIA_PATH — is the drive plugged in and mounted?"
+        fi
+    fi
+
+    # The second folder is OPTIONAL: failing the whole server because it is
+    # unplugged would also take the main library down.
+    SECOND_MEDIA_MOUNT=()
+    if [[ -n "$MEDIA_PATH_2" ]]; then
+        if media_available "$MEDIA_PATH_2"; then
+            SECOND_MEDIA_MOUNT=("-v" "${MEDIA_PATH_2}:/media2:ro")
+            log "INFO" "Second media path found: $MEDIA_PATH_2 → /media2"
+        else
+            log "WARN" "Second media path not found or empty: '$MEDIA_PATH_2' — starting WITHOUT it"
+        fi
+    fi
+
+    notify "Jellyfin" "Checking for updates and preparing the GPU..." "$NOTIFY_ICON" 2000
+    warn_if_not_crun
+    detect_gpu
+    if ! $GPU_OK && is_true "$REQUIRE_GPU"; then
+        if $DRY_RUN; then
+            log "WARN" "REQUIRE_GPU=true and no GPU is available (a real start would be refused)"
+        else
+            die "REQUIRE_GPU=true but no usable GPU was found — not starting. See the warnings above."
+        fi
+    fi
+
+    if $DRY_RUN; then
+        log "INFO" "--dry-run: skipping image pull, volume creation and backup"
+    else
+        pull_image
+        # Named volumes survive even if the container is deleted.
+        podman volume create "$CONFIG_VOLUME" >/dev/null 2>&1 || true
+        podman volume create "$CACHE_VOLUME"  >/dev/null 2>&1 || true
+        if [[ "$TRANSCODE_MODE" == "disk" ]]; then
+            podman volume create "$TRANSCODE_VOLUME" >/dev/null 2>&1 || true
+        fi
+        if $IMAGE_UPDATED && is_true "$BACKUP_BEFORE_UPDATE"; then
+            backup_config_volume || die "Backup before the update FAILED — not starting. Fix it, or set JELLYFIN_BACKUP_BEFORE_UPDATE=false to skip."
+        fi
+    fi
+
+    detect_network
+
+    # Timezone
+    if [[ -z "$TZ_VALUE" ]] && command -v timedatectl >/dev/null 2>&1; then
+        TZ_VALUE="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    fi
+
+    build_run_args "$GPU_OK"
+
+    if $DRY_RUN; then
+        printf 'podman'; printf ' %q' "${RUN_ARGS[@]}"; printf '\n'
+        return 0
+    fi
+
+    log "INFO" "Starting container: $CONTAINER_NAME"
+    log "INFO" "Image: $CONTAINER_IMAGE | Host port: $JELLYFIN_PORT | Network: $MSG_MODE | GPU: $GPU_OK | Read-only: $READ_ONLY"
+
+    # Wrapped in "if !" so a failure is caught explicitly (under "set -e" a bare
+    # failing command would kill the script with no notification). stderr is
+    # folded in so the real reason podman refused to start is captured.
+    local run_output
+    if ! run_output="$(podman "${RUN_ARGS[@]}" 2>&1)"; then
+        log "ERROR" "podman run failed:"
+        log "ERROR" "$run_output"
+        if $GPU_OK && ! is_true "$REQUIRE_GPU"; then
+            # The GPU setup is the most common cause (outdated CDI spec, missing
+            # permissions…). Rather than leave you without a server, retry once
+            # without the GPU — software transcoding is slower but works.
+            log "WARN" "Retrying WITHOUT the GPU (software transcoding) — fix the error above to get hardware acceleration back"
+            build_run_args false
+            if ! run_output="$(podman "${RUN_ARGS[@]}" 2>&1)"; then
+                log "ERROR" "podman run failed again:"
+                log "ERROR" "$run_output"
+                notify "Jellyfin FAILED" "podman run error: $(printf '%s' "$run_output" | head -c 400)" "$FAIL_ICON" 10000
+                exit 1
+            fi
+            GPU_OK=false
+            notify "Jellyfin" "Started WITHOUT GPU acceleration — check the log: $LOGFILE" "$FAIL_ICON" 10000
+        else
+            notify "Jellyfin FAILED" "podman run error: $(printf '%s' "$run_output" | head -c 400)" "$FAIL_ICON" 10000
+            exit 1
+        fi
+    fi
+
+    local timeout="$HEALTH_TIMEOUT_NORMAL"
+    if $IMAGE_UPDATED; then timeout="$HEALTH_TIMEOUT_AFTER_UPDATE"; fi
+    if wait_healthy "$timeout"; then
+        log "INFO" "Jellyfin started successfully"
+        notify "Jellyfin" "Started 🚀 with ${MSG_MODE}"$'\n\n'"${MSG_URLS}" "$NOTIFY_ICON" 10000
+    else
+        local error_log
+        error_log="$(podman logs --tail 20 "$CONTAINER_NAME" 2>&1 | head -c 500 || true)"
+        log "ERROR" "Failed to start Jellyfin. Last log lines:"
+        log "ERROR" "${error_log:-No logs available}"
+        notify "Jellyfin FAILED" "${error_log:-No logs available}" "$FAIL_ICON" 10000
+        exit 1
+    fi
+
+    weekly_cleanup
+}
+
+# weekly_cleanup — removes DANGLING images only (the old image left behind after
+# an update). Volumes are never pruned: "podman volume prune" deletes every
+# unused named volume on the system, including other projects' data.
+weekly_cleanup() {
+    local marker="$STATE_DIR/${CONTAINER_NAME}-last-prune"
+    if [[ ! -f "$marker" ]] || [[ -n "$(find "$marker" -mtime +6 -print -quit)" ]]; then
+        (
+            log "INFO" "Running weekly cleanup of dangling images..."
+            if podman image prune -f >>"$LOGFILE" 2>&1; then
+                log "INFO" "Cleanup completed"
+            else
+                log "WARN" "Cleanup finished with errors — check $LOGFILE"
+            fi
+            touch "$marker"
+        ) &
+        disown || true
+    fi
+}
+
+usage() {
+    cat <<EOF
+Jellyfin + Tailscale + Podman launcher (NVIDIA) v${SCRIPT_VERSION}
+
+USAGE
+  $(basename -- "$0") [COMMAND] [--dry-run]
+
+COMMANDS
+  toggle   (default) start if stopped, stop if running — the desktop-icon behaviour
+  start    start (does nothing if it is already running)
+  stop     stop cleanly
+  restart  stop + start
+  update   force-pull the newest image (with a config backup) and restart
+  status   show state, health, uptime and URLs (exit code 3 if stopped)
+  logs     follow the container logs (Ctrl+C to leave)
+  backup   export the config volume to ${BACKUP_DIR}
+  restore FILE   replace the config volume with a backup (asks for confirmation)
+  help, --version
+
+OPTIONS
+  --dry-run  print the exact "podman run" command and exit, changing nothing
+             (no pull, no backup, no container)
+
+Settings are environment variables (JELLYFIN_MEDIA_PATH, JELLYFIN_MEMORY, …) —
+see the USER CONFIGURATION section of this script and the README.
+EOF
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ▶️  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+main() {
+    while (( $# > 0 )); do
+        case "$1" in
+            --dry-run) DRY_RUN=true ;;
+            toggle|start|stop|restart|update|status|logs|backup) CMD="$1" ;;
+            restore)
+                CMD="restore"
+                if (( $# < 2 )); then echo "restore needs a backup file" >&2; usage >&2; exit 2; fi
+                RESTORE_FILE="$2"; shift ;;
+            help|-h|--help) usage; exit 0 ;;
+            --version|-V)   echo "$SCRIPT_VERSION"; exit 0 ;;
+            *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+        esac
+        shift
+    done
+    if $DRY_RUN; then
+        case "$CMD" in
+            toggle|start|restart|update) ;;
+            *) echo "--dry-run only works with: toggle, start, restart, update" >&2; exit 2 ;;
+        esac
+    fi
+
+    # Both checks run BEFORE touching anything else on the system.
+    check_deps
+    validate_config
+
+    case "$CMD" in
+        status) cmd_status || exit $? ; exit 0 ;;
+        logs)   cmd_logs ;;
+    esac
+
+    # Commands that change things: only one at a time.
+    if ! acquire_lock; then
+        notify "Jellyfin" "Already starting… (wait a moment)" "$NOTIFY_ICON"
+        exit 1
+    fi
+    local dry_note=""
+    if $DRY_RUN; then dry_note=" (dry-run)"; fi
+    log "INFO" "Script started by $(id -un) (PID $$) — command: ${CMD}${dry_note}"
+
+    case "$CMD" in
+        toggle)
+            if is_running; then stop_container; else cmd_start; fi ;;
+        start)
+            if is_running; then log "INFO" "Already running"; notify "Jellyfin" "Already running" "$NOTIFY_ICON"; else cmd_start; fi ;;
+        stop)
+            if is_running; then stop_container; else log "INFO" "Already stopped"; fi ;;
+        restart)
+            if is_running; then stop_container; fi
+            cmd_start ;;
+        update)
+            AUTO_PULL=true
+            if is_running; then stop_container; fi
+            cmd_start ;;
+        backup)  cmd_backup ;;
+        restore) cmd_restore ;;
+    esac
+}
+
+main "$@"
